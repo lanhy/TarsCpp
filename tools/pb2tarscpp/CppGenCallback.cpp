@@ -1,4 +1,4 @@
-// Generates C++ tars service interface out of Protobuf IDL.
+﻿// Generates C++ tars service interface out of Protobuf IDL.
 //
 // This is a Proto2 compiler plugin.  See net/proto2/compiler/proto/plugin.proto
 // and net/proto2/compiler/public/plugin.h for more information on plugins.
@@ -14,7 +14,7 @@ static std::string GenCallbackMethod(const ::google::protobuf::MethodDescriptor*
     std::string out;
     out.reserve(8 * 1024);
 
-    out = "virtual void callback_" + method->name() + "(const " + pkg + "::" + method->output_type()->name() + "& ret)" + LineFeed(indent);
+    out = "virtual void callback_" + method->name() + "(const " + ToCppNamespace(method->output_type()->full_name()) + "& ret)" + LineFeed(indent);
     out += "{ throw std::runtime_error(\"callback_" + method->name() + " override incorrect.\"); }" + LineFeed(indent);
 
     out += "virtual void callback_" + method->name() + "_exception(tars::Int32 ret)" + LineFeed(indent);
@@ -66,10 +66,18 @@ std::string GenPrxCallback(const ::google::protobuf::ServiceDescriptor* desc, in
     out += LineFeed(indent);
     out += LineFeed(indent);
 
-    for (int i = 0; i < desc->method_count(); ++i) {
-        auto method = desc->method(i);
-        out += GenCallbackMethod(method, pkg, indent);
-    }
+    //sort by method name
+	std::map<std::string, const ::google::protobuf::MethodDescriptor*> m_method;
+	for (int i = 0; i < desc->method_count(); ++i)
+	{
+		m_method[desc->method(i)->name()] = desc->method(i);
+	}
+
+	for(auto it = m_method.begin(); it != m_method.end(); ++it)
+	{
+		auto method = it->second;
+		out += GenCallbackMethod(method, pkg, indent);
+	}
 
     out += LineFeed(indent);
     out += LineFeed(indent);
@@ -86,8 +94,9 @@ std::string GenPrxCallback(const ::google::protobuf::ServiceDescriptor* desc, in
     out += "static ::std::string __all[] = ";
     out += "{";
     out += LineFeed(++indent);
-    for (int i = 0; i < desc->method_count(); ++i) {
-        auto method = desc->method(i);
+    for(auto it = m_method.begin(); it != m_method.end(); ++it)
+	{
+    	auto method = it->second;
         out += "\"" + method->name() + "\",";
         out += LineFeed(indent);
     }
@@ -99,23 +108,25 @@ std::string GenPrxCallback(const ::google::protobuf::ServiceDescriptor* desc, in
     out += "switch(r.first - __all)" + LineFeed(indent);
     out += "{";
     out += LineFeed(++indent);
-    for (int i = 0; i < desc->method_count(); ++i) {
-        auto method = desc->method(i);
+    int i = 0;
+    for(auto it = m_method.begin(); it != m_method.end(); ++it)
+	{
+    	auto method = it->second;
         out += LineFeed(indent);
         out += "case " + std::to_string((long long)i) + ":" + LineFeed(indent);
         out += "{" + LineFeed(++indent);
-        out += "if (msg->response.iRet != tars::TARSSERVERSUCCESS)" + LineFeed(indent);
+        out += "if (msg->response->iRet != tars::TARSSERVERSUCCESS)" + LineFeed(indent);
         out += "{" + LineFeed(++indent);
-        out += "callback_" + method->name() + "_exception(msg->response.iRet);" + LineFeed(indent);
-        out += "return msg->response.iRet;" + LineFeed(--indent) + "}";
+        out += "callback_" + method->name() + "_exception(msg->response->iRet);" + LineFeed(indent);
+        out += "return msg->response->iRet;" + LineFeed(--indent) + "}";
     
         out += LineFeed(indent);
-        out += pkg + "::" + method->output_type()->name() + " _ret;" + LineFeed(indent);
-        out += "_ret.ParseFromArray(msg->response.sBuffer.data(), msg->response.sBuffer.size());" + LineFeed(indent);
+        out += ToCppNamespace(method->output_type()->full_name()) + " _ret;" + LineFeed(indent);
+        out += "_ret.ParseFromArray(msg->response->sBuffer.data(), msg->response->sBuffer.size());" + LineFeed(indent);
         out += "CallbackThreadData * pCbtd = CallbackThreadData::getData();" + LineFeed(indent);
         out += "assert(pCbtd != NULL);" + LineFeed(indent);
         out += LineFeed(indent);
-        out += "pCbtd->setResponseContext(msg->response.context);" + LineFeed(indent);
+        out += "pCbtd->setResponseContext(msg->response->context);" + LineFeed(indent);
         out += "callback_" + method->name() + "(_ret);" + LineFeed(indent);
         out += "pCbtd->delResponseContext();" + LineFeed(indent);
         out += LineFeed(indent);
@@ -123,6 +134,8 @@ std::string GenPrxCallback(const ::google::protobuf::ServiceDescriptor* desc, in
 
         out += LineFeed(--indent);
         out += "}";
+
+        ++i;
     }
 
     // end switch

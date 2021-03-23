@@ -1,6 +1,6 @@
 # version
 set(PARSER_VERSION "${TARS_VERSION}")
-set(GENERATOR_VERSION "20180620")
+set(GENERATOR_VERSION "20200627")
 
 # namespace
 set(IDL_NAMESPACE Tars)
@@ -14,8 +14,10 @@ set(IDL_TYPE "Tars")
 set(PROTOCOL_NAME "Tup")
 
 # flag
+if(UNIX)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O2 -Wall")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O2 -Wall")
+endif(UNIX)
 
 # define
 add_definitions(-DPARSER_VERSION="${PARSER_VERSION}")

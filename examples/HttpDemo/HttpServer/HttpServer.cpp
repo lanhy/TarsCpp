@@ -1,4 +1,4 @@
-/**
+Ôªø/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -21,44 +21,6 @@ using namespace std;
 
 HttpServer g_app;
 
-/////////////////////////////////////////////////////////////////
-struct HttpProtocol
-{
-    /**
-     * Ω‚Œˆhttp«Î«Û
-     * @param in
-     * @param out
-     *
-     * @return int
-     */
-    static int parseHttp(string &in, string &out)
-    {
-        try
-        {
-                        //≈–∂œ«Î«Û «∑Ò «HTTP«Î«Û
-            bool b = TC_HttpRequest ::checkRequest(in.c_str(), in.length());
-                        //ÕÍ’˚µƒHTTP«Î«Û
-            if(b)
-            {
-                out = in;
-                in  = "";
-                //TLOGDEBUG("out size: " << out.size() << endl);
-                return TC_EpollServer::PACKET_FULL;
-            }
-            else
-            {
-                return TC_EpollServer::PACKET_LESS;
-            }
-        }
-        catch(exception &ex)
-        {
-            return TC_EpollServer::PACKET_ERR;
-        }
-
-        return TC_EpollServer::PACKET_LESS;             //±Ì æ ’µΩµƒ∞¸≤ªÕÍ»´
-    }
-
-};
 
 void
 HttpServer::initialize()
@@ -67,7 +29,8 @@ HttpServer::initialize()
     //...
 
     addServant<HttpImp>(ServerConfig::Application + "." + ServerConfig::ServerName + ".HttpObj");
-    addServantProtocol(ServerConfig::Application + "." + ServerConfig::ServerName + ".HttpObj",&HttpProtocol::parseHttp);
+    addServantProtocol(ServerConfig::Application + "." + ServerConfig::ServerName + ".HttpObj",&TC_NetWorkBuffer::parseHttp);
+    addAcceptCallback(std::bind(&HttpServer::onNewClient, this, std::placeholders::_1));
 }
 /////////////////////////////////////////////////////////////////
 void
@@ -76,6 +39,12 @@ HttpServer::destroyApp()
     //destroy application here:
     //...
 }
+
+void HttpServer::onNewClient(TC_EpollServer::Connection* conn)
+{
+//    std::cout << "New client from " << conn->getIp() << ":" << conn->getPort() << std::endl;
+}
+
 /////////////////////////////////////////////////////////////////
 int
 main(int argc, char* argv[])

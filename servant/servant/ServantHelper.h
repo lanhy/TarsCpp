@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -22,6 +22,7 @@
 #include <vector>
 #include "util/tc_autoptr.h"
 #include "util/tc_singleton.h"
+#include "util/tc_spin_lock.h"
 #include "servant/Servant.h"
 
 namespace tars
@@ -44,7 +45,9 @@ typedef TC_AutoPtr<ServantHelperCreation> ServantHelperCreationPtr;
 template<class T>
 struct ServantCreation : public ServantHelperCreation
 {
-    ServantPtr create(const string &s) { T *p = new T; p->setName(s); return p; }
+    ServantCreation(Application *application) : _application(application){}
+    ServantPtr create(const string &s) { T *p = new T; p->setName(s); p->setApplication(_application); return p; }
+    Application *_application;
 };
 
 //////////////////////////////////////////////////////////////////////////////
@@ -52,7 +55,7 @@ struct ServantCreation : public ServantHelperCreation
 /**
  * Servant管理
  */
-class ServantHelperManager : public TC_Singleton<ServantHelperManager>
+class SVT_DLL_API ServantHelperManager
 {
 public:
     /**
@@ -69,14 +72,14 @@ public:
      * @param id
      */
     template<typename T>
-    void addServant(const string &id,bool check = false)
+    void addServant(const string &id, Application *application, bool check = false)
     {
         if(check && _servant_adapter.end() == _servant_adapter.find(id))
         {
             cerr<<"[TARS]ServantHelperManager::addServant "<< id <<" not find adapter.(maybe not conf in the web)"<<endl;
-            throw runtime_error("[TARS]ServantHelperManager::addServant " + id + " not find adapter.(maybe not conf in the web)");
+			throw runtime_error("[TARS]ServantHelperManager::addServant " + id + " not find adapter.(maybe not conf in the web)");
         }
-        _servant_creator[id] = new ServantCreation<T>();
+        _servant_creator[id] = new ServantCreation<T>(application);
     }
 
     /**
@@ -99,14 +102,15 @@ public:
      * @param sAdapter
      * @return string
      */
-    string getAdapterServant(const string &sAdapter)
+    const string &getAdapterServant(const string &sAdapter) const
     {
-        map<string, string>::iterator it = _adapter_servant.find(sAdapter);
+        static const string s = "(NO TARS PROTOCOL)";
+		auto it = _adapter_servant.find(sAdapter);
         if(it != _adapter_servant.end())
         {
             return it->second;
         }
-        return "(NO TARS PROTOCOL)";
+        return s;
     }
 
     /**
@@ -114,21 +118,23 @@ public:
      * @param sServant
      * @return string
      */
-    string getServantAdapter(const string& sServant)
+    const string &getServantAdapter(const string& sServant) const
     {
-        map<string, string>::iterator it = _servant_adapter.find(sServant);
+	    static const string s = "";
+
+	    auto it = _servant_adapter.find(sServant);
         if(it != _servant_adapter.end())
         {
             return it->second;
         }
-        return "";
+        return s;
     }
 
     /**
      * 获取Adapter/Servant对应表
      * @return map<string, string>
      */
-    map<string, string> getAdapterServant() {return _adapter_servant;}
+    const map<string, string> &getAdapterServant() const {return _adapter_servant;}
 
     /**
      * 设置染色信息
@@ -147,12 +153,12 @@ public:
      * @param sInterface:接口名称
      * @return string: 设置结果
      */
-    bool isDyeingReq(const string & sKey, const string & sServant, const string & sInterface);
+    bool isDyeingReq(const string & sKey, const string & sServant, const string & sInterface) const;
 
     /**
      * 是否是已经被染色
      */
-    bool isDyeing() {return _isDyeing;}
+    bool isDyeing() const {return _isDyeing;}
 
 
 protected:
@@ -177,12 +183,12 @@ protected:
     /**
      * 锁
      */
-    TC_ThreadMutex _mutex;
+    TC_SpinLock    _mutex;
 
     /**
      * 是否染色
      */
-    bool           _isDyeing;
+    bool   _isDyeing;
 
     /**
      * 染色用户号码

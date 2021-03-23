@@ -1,14 +1,13 @@
-
 #-----------------------------------------------------------------------
 
 APP       := DemoApp
 TARGET    := DemoServer
-CONFIG    := 
+CONFIG    :=
 STRIP_FLAG:= N
-TARS2CPP_FLAG:= 
+TARS2CPP_FLAG:=
 
-INCLUDE   += 
-LIB       += 
+INCLUDE   +=
+LIB       +=
 
 #-----------------------------------------------------------------------
 

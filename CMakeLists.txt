@@ -1,42 +1,46 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.2)
 
-project(tars_cpp)
+project(tars-cpp)
 
-set(CMAKE_VERBOSE_MAKEFILE off)
+#-------------------------------------------------------------------
 
-set(MYSQL_DIR_INC "/usr/local/mysql/include")
-set(MYSQL_DIR_LIB "/usr/local/mysql/lib")
+if("${TARS_CPP_COMMON}" STREQUAL "")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -O2 -Wall -Wno-deprecated")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O2 -Wall -Wno-deprecated")
+    set(TARS_CPP_COMMON "1")
 
-#for coverage statistics
-#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -O2 -Wall -Wno-deprecated -fprofile-arcs -ftest-coverage")
-#set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O2 -Wall -Wno-deprecated -fprofile-arcs -ftest-coverage")
+    include("${PROJECT_SOURCE_DIR}/cmake/Common.cmake")
 
-#set(CMAKE_BUILD_TYPE "Debug")
+    include("${PROJECT_SOURCE_DIR}/cmake/BuildTarsCpp.cmake")
 
-set(TARS_VERSION "1.1.0")
-add_definitions(-DTARS_VERSION="${TARS_VERSION}")
-set(TARS_SSL 0)
-add_definitions(-DTARS_SSL=${TARS_SSL})
-set(TARS_HTTP2 0)
-add_definitions(-DTARS_HTTP2=${TARS_HTTP2})
+    include("${PROJECT_SOURCE_DIR}/cmake/Thirdparty.cmake")
 
-set(_USE_OPENTRACKING $ENV{_USE_OPENTRACKING})
-if(_USE_OPENTRACKING)
-set(OPENTRACKING_INC "/usr/local/include")
-add_definitions(-D_USE_OPENTRACKING=${_USE_OPENTRACKING})
+    include("${PROJECT_SOURCE_DIR}/cmake/ParseAsm.cmake")
+
 endif()
 
-set(INSTALL_PREFIX "/usr/local/tars/cpp")
+set(CLEAR_INCLUDE "clear-install.cmake")
+FILE(WRITE ${CLEAR_INCLUDE} "EXECUTE_PROCESS(COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_INSTALL_PREFIX}/include)\n")
+install(SCRIPT ${CLEAR_INCLUDE})
 
-set(CMAKE_INSTALL_PREFIX ${INSTALL_PREFIX})
+#-------------------------------------------------------------------
+
+include_directories(${PROJECT_SOURCE_DIR}/util/include)
+
+include_directories(${PROJECT_SOURCE_DIR}/servant)
+include_directories(${PROJECT_SOURCE_DIR}/servant/protocol)
+
+IF(WIN32)
+include_directories(${PROJECT_SOURCE_DIR}/util/src/epoll_windows)
+ENDIF()
 
 add_subdirectory(util)
 add_subdirectory(tools)
-
-set(TARS2CPP "${tools_BINARY_DIR}/tars2cpp/tars2cpp")
-
 add_subdirectory(servant)
+
+IF (NOT ${ONLY_LIB})
+add_subdirectory(examples)
+ENDIF()
+
+#add_subdirectory(test_deprecated)
+
 

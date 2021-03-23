@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -18,15 +18,14 @@
 #include "servant/BaseF.h"
 #include "servant/Application.h"
 #include "servant/AppCache.h"
-#include "servant/TarsLogger.h"
+#include "servant/RemoteLogger.h"
 
 #include <cerrno>
 
 namespace tars
 {
 
-TC_ThreadMutex CallbackThreadData::_mutex;
-pthread_key_t CallbackThreadData::_key = 0;
+thread_local shared_ptr<CallbackThreadData> CallbackThreadData::g_sp;
 
 Servant::Servant():_handle(NULL)
 {
@@ -46,6 +45,18 @@ string Servant::getName() const
     return _name;
 }
 
+void Servant::setApplication(Application *application)
+{
+    _application = application;
+
+	setNotifyObserver(application->getNotifyObserver());
+}
+
+Application* Servant::getApplication() const
+{
+    return _application;
+}
+
 void Servant::setHandle(TC_EpollServer::Handle* handle)
 {
     _handle = handle;
@@ -56,13 +67,13 @@ TC_EpollServer::Handle* Servant::getHandle()
     return _handle;
 }
 
-int Servant::dispatch(TarsCurrentPtr current, vector<char> &buffer)
+int Servant::dispatch(CurrentPtr current, vector<char> &buffer)
 {
     int ret = TARSSERVERUNKNOWNERR;
 
     if (current->getFuncName() == "tars_ping")
     {
-        TLOGINFO("[TARS][Servant::dispatch] tars_ping ok from [" << current->getIp() << ":" << current->getPort() << "]" << endl);
+        TLOGTARS("[Servant::dispatch] tars_ping ok from [" << current->getIp() << ":" << current->getPort() << "]" << endl);
 
         ret = TARSSERVERSUCCESS;
     }
@@ -81,13 +92,13 @@ int Servant::dispatch(TarsCurrentPtr current, vector<char> &buffer)
     return ret;
 }
 
-TC_ThreadQueue<ReqMessagePtr>& Servant::getResponseQueue()
+TC_CasQueue<ReqMessagePtr>& Servant::getResponseQueue()
 {
     return _asyncResponseQueue;
 }
 
 ///////////////////////////////////////////////////////////////////////////
-ServantCallback::ServantCallback(const string& type, const ServantPtr& servant, const TarsCurrentPtr& current)
+ServantCallback::ServantCallback(const string& type, const ServantPtr& servant, const CurrentPtr& current)
 : _servant(servant)
 , _current(current)
 {
@@ -108,7 +119,7 @@ const ServantPtr& ServantCallback::getServant()
     return _servant;
 }
 
-const TarsCurrentPtr& ServantCallback::getCurrent()
+const CurrentPtr& ServantCallback::getCurrent()
 {
     return _current;
 }
@@ -118,43 +129,20 @@ CallbackThreadData::CallbackThreadData():_contextValid(false)
 {
 }
 
-void CallbackThreadData::destructor(void* p)
-{
-    CallbackThreadData * pCbtd = (CallbackThreadData*)p;
-    if(pCbtd)
-        delete pCbtd;
-}
+// void CallbackThreadData::destructor(void* p)
+// {
+//     CallbackThreadData * pCbtd = (CallbackThreadData*)p;
+//     if(pCbtd)
+//         delete pCbtd;
+// }
 
 CallbackThreadData * CallbackThreadData::getData()
 {
-    if(_key == 0)
+    if(!g_sp)
     {
-        TC_LockT<TC_ThreadMutex> lock(_mutex);
-        if(_key == 0)
-        {
-            int iRet = ::pthread_key_create(&_key, CallbackThreadData::destructor);
-
-            if (iRet != 0)
-            {
-                TLOGERROR("[TARS][CallbackThreadData pthread_key_create fail:" << errno << ":" << strerror(errno) << "]" << endl);
-                return NULL;
-            }
-        }
+        g_sp.reset(new CallbackThreadData());
     }
-
-    CallbackThreadData * pCbtd = (CallbackThreadData*)pthread_getspecific(_key);
-
-    if(!pCbtd)
-    {
-        TC_LockT<TC_ThreadMutex> lock(_mutex);
-
-        pCbtd = new CallbackThreadData();
-
-        int iRet = pthread_setspecific(_key, (void *)pCbtd);
-
-        assert(iRet == 0);
-    }
-    return pCbtd;
+    return g_sp.get();
 }
 
 

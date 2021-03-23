@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -44,7 +44,6 @@ namespace tars
 struct TC_HashMapCompact_Exception : public TC_Exception
 {
     TC_HashMapCompact_Exception(const string &buffer) : TC_Exception(buffer){};
-    TC_HashMapCompact_Exception(const string &buffer, int err) : TC_Exception(buffer, err){};
     ~TC_HashMapCompact_Exception() throw(){};
 };
 
@@ -58,6 +57,13 @@ class TC_HashMapCompact
 public:
     struct HashMapIterator;
     struct HashMapLockIterator;
+
+    friend struct Block;
+    friend struct BlockAllocator;
+    friend struct HashMapIterator;
+    friend struct HashMapItem;
+    friend struct HashMapLockIterator;
+    friend struct HashMapLockItem;
 
     /**
      * @brief 操作数据
@@ -97,6 +103,7 @@ public:
         /**
          * @brief block数据头
          */
+#pragma pack(1) 
         struct tagBlockHead
         {
             uint16_t    _iSize;         /**block的容量大小*/
@@ -109,7 +116,7 @@ public:
             uint32_t    _iGetPrev;      /**Get链上的上一个Block*/
             uint32_t    _iSyncTime;     /**上次缓写时间*/
             uint32_t    _iExpireTime;    /** 数据过期的绝对时间，由设置或更新数据时提供，0表示不关心此时间*/
-            uint8_t        _iVersion;        /** 数据版本，1为初始版本，0为保留*/
+            uint8_t     _iVersion;        /** 数据版本，1为初始版本，0为保留*/
             bool        _bDirty;        /**是否是脏数据*/
             bool        _bOnlyKey;      /**是否只有key, 没有内容*/
             bool        _bNextChunk;    /**是否有下一个chunk*/
@@ -119,7 +126,7 @@ public:
                 uint32_t  _iDataLen;      /**当前数据块中使用了的长度, _bNextChunk=false时有效*/
             };
             char        _cData[0];      /**数据开始部分*/
-        }__attribute__((packed));
+        };
 
         /**
          * @brief 非头部的block, 称为chunk
@@ -134,8 +141,9 @@ public:
                 uint32_t  _iDataLen;      /**当前数据块中使用了的长度, _bNextChunk=false时有效*/
             };
             char        _cData[0];      /**数据开始部分*/
-        }__attribute__((packed));
+        };
 
+#pragma pack() 
         /**
          * @brief 构造函数
          * @param Map
@@ -1043,6 +1051,7 @@ public:
     /**
      * map头
      */
+#pragma pack(1) 
     struct tagMapHead
     {
         char        _cMaxVersion;        //大版本
@@ -1070,10 +1079,9 @@ public:
         uint32_t    _iBackupTail;        //热备指针
         uint32_t    _iSyncTail;          //回写链表
         uint32_t    _iOnlyKeyCount;        // OnlyKey个数
-        bool         _bInit;                 //是否已经完成初始化
+        bool        _bInit;                 //是否已经完成初始化
         char        _cReserve[15];          //保留
-        //uint32_t    _iReserve[4];       //保留
-    }__attribute__((packed));
+    };
 
     /**
      * 需要修改的地址
@@ -1083,7 +1091,7 @@ public:
         size_t  _iModifyAddr;       /**修改的地址*/
         char    _cBytes;            /**字节数*/
         size_t  _iModifyValue;      /**值*/
-    }__attribute__((packed));
+    };
 
     /**
      * 修改数据块头部
@@ -1093,7 +1101,7 @@ public:
         char            _cModifyStatus;         /**修改状态: 0:目前没有人修改, 1: 开始准备修改, 2:修改完毕, 没有copy到内存中*/
         uint32_t        _iNowIndex;             /**更新到目前的索引, 不能操作10个*/
         tagModifyData   _stModifyData[50000];     /**一次最多50000次修改*/
-    }__attribute__((packed));
+    };
 
     /**
      * HashItem
@@ -1102,13 +1110,13 @@ public:
     {
         uint32_t _iBlockAddr;     /**指向数据项的偏移地址*/
         uint32_t _iListCount;     /**链表个数*/
-    }__attribute__((packed));
-
+    };
+#pragma pack() 
     /**
      * @brief 64位操作系统用基数版本号, 32位操作系统用64位版本号
      *  */
     //64位操作系统用基数版本号, 32位操作系统用偶数版本号
-#if __WORDSIZE == 64
+#if __WORDSIZE == 64 || defined _WIN64
 
     /**
      * @brief 定义版本号
@@ -1175,7 +1183,7 @@ public:
     /**
      * @brief 定义hash处理器
       */
-    using hash_functor = std::function<size_t (const string& )>;
+    typedef std::function<size_t(const string &)> hash_functor;
 
     //////////////////////////////////////////////////////////////////////////////////////////////
     //map的接口定义
@@ -1755,13 +1763,6 @@ public:
 
 protected:
 
-    friend class Block;
-    friend class BlockAllocator;
-    friend class HashMapIterator;
-    friend class HashMapItem;
-    friend class HashMapLockIterator;
-    friend class HashMapLockItem;
-
     /**
      * @brief 禁止copy构造
      *  */
@@ -1808,7 +1809,7 @@ protected:
      */
     void delOnlyKeyCount()    { saveValue(&_pHead->_iOnlyKeyCount, _pHead->_iOnlyKeyCount-1); }
 
-    /*
+    /** 
      * @brief 增加Chunk数
      * 以选择是否可直接更新, 因为有可能一次分配的chunk个数
      * 多余更新区块的内存空间, 导致越界错误

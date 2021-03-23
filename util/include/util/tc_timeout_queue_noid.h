@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -68,6 +68,10 @@ public:
     TC_TimeoutQueueNoID()
     {
     }
+
+	typename list_type::iterator begin() { return _list.begin(); }
+	typename list_type::iterator end() { return _list.end(); }
+
 
     /**
      * @brief 取出队列第一个数据

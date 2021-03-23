@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -19,14 +19,17 @@
 
 #include "util/tc_autoptr.h"
 #include "util/tc_epoll_server.h"
+#include "util/tc_thread_pool.h"
+#include "util/tc_cas_queue.h"
 #include "servant/ServantProxy.h"
-#include "servant/TarsCurrent.h"
+#include "servant/Current.h"
 #include "servant/BaseNotify.h"
 
 namespace tars
 {
 
 class BaseNotify;
+class Application;
 ////////////////////////////////////////////////////////////////////
 /**
  * 每个对象的基类
@@ -63,6 +66,18 @@ public:
     void setHandle(TC_EpollServer::Handle* handle);
 
     /**
+     * 设置全局的应用
+     * @param application
+     */
+    void setApplication(Application *application);
+
+    /**
+     * 获取应用
+     * @return
+     */
+    Application* getApplication() const;
+
+    /**
      * 获取所属的Handle
      * @return HandlePtr& 
      */
@@ -87,16 +102,16 @@ public:
      * @param sSend
      * @return int
      */
-    virtual int dispatch(TarsCurrentPtr current, vector<char> &buffer);
+    virtual int dispatch(CurrentPtr current, vector<char> &buffer);
 
     /**
-     * tars协议，分发并处理请求
+     * 分发并处理请求
      * @param sRecv
      * @param sFuncName
      * @param sSend
      * @return int
      */
-    virtual int onDispatch(TarsCurrentPtr current, vector<char> &buffer) { return -1; }
+    virtual int onDispatch(CurrentPtr current, vector<char> &buffer) { return -1; }
 
 public:
     /**
@@ -105,7 +120,7 @@ public:
      * @param buffer 
      * @return int 
      */
-    virtual int doRequest(TarsCurrentPtr current, vector<char> &buffer) { return -1; }
+    virtual int doRequest(CurrentPtr current, vector<char> &buffer) { return -1; }
 
     /**
      * 作为客户端访问其他server时，成功返回的响应接口
@@ -132,13 +147,11 @@ public:
     /**
      * 每次handle被唤醒后都会调用，业务可以通过在其他线程中调用handle的notify
      * 实现在主线程中处理自有数据的功能，比如定时器任务或自有网络的异步响应;
-     * [一般都需要配合业务自有的队列使用，队列可以封装在ServantImp对象中] 
-     *  
-     * 关于参数bExpectIdle： 
-     * 一般业务不用关注该值，可忽略。 
-     *  
-     * bExpectIdle为true时，在循环Adapter时调用的 
-     * bExpectIdle为false时，在处理Adapter上的请求时调用的 
+	 * [一般都需要配合业务自有的队列使用，队列可以封装在ServantImp对象中] 
+	 *  
+	 * 关于参数bExpectIdle： 
+	 * bExpectIdle为true时，在循环Adapter时调用的, 处理请求前调用(心跳)
+	 * bExpectIdle为false时，在每次处理Adapter上的请求后时调用
      *
      * doCustomMessage() 不带参数的是为了兼容老版本。尽量用带参数的函数
      * 现在不带参数和带参数的都会调用
@@ -146,19 +159,18 @@ public:
     virtual int doCustomMessage(bool bExpectIdle) { return -1; }
     virtual int doCustomMessage() { return -1; }
 
-
-     /**
+	 /**
      * 客户端关闭连接时的处理
-     * @param current 
-     * @return int  
+	 * @param current 
+	 * @return int  
      */
-    virtual int doClose(TarsCurrentPtr current){ return -1; }
+	virtual int doClose(CurrentPtr current){ return -1; }
 
     /**
      * 获得响应的数据队列
      * @return TC_ThreadQueue<ReqMessagePtr>& 
      */
-    TC_ThreadQueue<ReqMessagePtr>& getResponseQueue();
+    TC_CasQueue<ReqMessagePtr>& getResponseQueue();
 
 protected:
     /**
@@ -167,21 +179,30 @@ protected:
     string _name;
 
     /**
+     * 应用
+     */
+    Application *_application;
+
+    /**
      * 所属的Handle
      */
     TC_EpollServer::Handle* _handle;
 
     /**
-     * 异步响应队列
+     * 异步响应队列, 每个Servant一个队列, 这个用于在ServantImp中, 再异步发请求给其他服务
+     * 回调Callback使用ServantCallback时, 能保证响应包在Servant::doResponse中响应, 且和发送ServantImp是同一个线程
+     * 缺点就是Servant::onDispatch, 通知ServantImp时, 需要把所有线程都唤醒
      */
-    TC_ThreadQueue<ReqMessagePtr> _asyncResponseQueue;
+    TC_CasQueue<ReqMessagePtr> _asyncResponseQueue;
 };
 
 typedef TC_AutoPtr<Servant> ServantPtr;
-
 //////////////////////////////////////////////////////////////////////
+
 /**
  * 单线程全异步中的callback对象，业务自有的callback需要从这里继承
+ * ServantCallback会把接收到的数据再放到对应servant的responsequeue中, 保证后续在对应的Servant::doResponse中处理
+ * 从而请求和响应在一个线程Servant中完成
  */
 class ServantCallback : public ServantProxyCallback
 {
@@ -192,7 +213,7 @@ public:
      * @param servant 
      * @param current 
      */
-    ServantCallback(const string& type, const ServantPtr& servant, const TarsCurrentPtr& current);
+    ServantCallback(const string& type, const ServantPtr& servant, const CurrentPtr& current);
 
     /**
      * callback的响应接口 
@@ -202,6 +223,14 @@ public:
     virtual int onDispatch(ReqMessagePtr msg);
 
     /**
+     * 连接关闭
+     * @param msg 
+     * @return int 
+     */    
+    virtual void onClose()
+    {
+    }
+    /**
      * 获得生成时所属的servant
      * @return const ServantPtr& 
      */
@@ -209,9 +238,9 @@ public:
 
     /**
      * 获得网络上下文
-     * @return const TarsCurrentPtr& 
+     * @return const CurrentPtr& 
      */
-    const TarsCurrentPtr& getCurrent();
+    const CurrentPtr& getCurrent();
 
 protected:
     /*
@@ -219,20 +248,16 @@ protected:
      */
     ServantPtr _servant;
 
-    /*
-     * TarsCurrent
-     */
-    TarsCurrentPtr _current;
+    CurrentPtr _current;
 };
 
 //////////////////////////////////////////////////////////////////////
 
 //线程私有数据
-class CallbackThreadData : public TC_ThreadPool::ThreadData
+class CallbackThreadData //: public TC_ThreadPool::ThreadData
 {
 public:
-    static TC_ThreadMutex _mutex;  //全局的互斥锁
-    static pthread_key_t _key;   //私有线程数据key
+    static thread_local shared_ptr<CallbackThreadData> g_sp;
 
     /**
      * 构造函数
@@ -244,17 +269,12 @@ public:
      */
     ~CallbackThreadData() {}
 
-    /**
-     * 数据资源释放
-     * @param p
-     */
-    static void destructor(void* p);
 
     /**
      * 获取线程数据，没有的话会自动创建
      * @return CallbackThreadData*
      */
-    static CallbackThreadData * getData();
+    static CallbackThreadData* getData();
 
 public:
     /**

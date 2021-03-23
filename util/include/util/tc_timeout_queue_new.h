@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -16,14 +16,17 @@
 
 #ifndef __TC_TIMEOUT_QUEUE_NEW_H
 #define __TC_TIMEOUT_QUEUE_NEW_H
+
 #include <map>
 #include <list>
+#include <functional>
+// #include <ext/hash_map>
 #include <unordered_map>
 #include <iostream>
 #include <cassert>
-#include <functional>
 #include "util/tc_autoptr.h"
 #include "util/tc_monitor.h"
+// #include "util/tc_functor.h"
 #include "util/tc_timeprovider.h"
 
 using namespace std;
@@ -33,7 +36,7 @@ namespace tars
 /////////////////////////////////////////////////
 /**
  * @file tc_timeout_queue_new.h
- * @brief 超时队列.
+ * @brief 超时队列, 没有锁, 非线程安全.
  *
  */
 /////////////////////////////////////////////////
@@ -51,7 +54,7 @@ public:
     typedef multimap<int64_t,NodeInfo>      time_type;
     typedef list<SendInfo>                  send_type;
 
-    using data_functor = std::function<void (T& )>;
+    typedef std::function<void(T&)> data_functor;
 
     struct PtrInfo
     {
@@ -71,12 +74,12 @@ public:
         typename data_type::iterator dataIter;
     };
     /**
-     * @brief 超时队列，缺省5s超时.
-     *
+	 * @brief 超时队列，缺省5s超时.
+	 *
      * @param timeout 超时设定时间
      * @param size
      */
-    TC_TimeoutQueueNew(int timeout = 5*1000,size_t size = 100 ) : _uniqId(0)
+    TC_TimeoutQueueNew(int timeout = 5*1000, size_t size = 100 ) : _uniqId(0)
     {
         _data.reserve(size);
     }
@@ -113,8 +116,8 @@ public:
     }
 
     /**
-     * @brief 获取指定id的数据.
-     *
+	 * @brief 获取指定id的数据.
+	 *
      * @param id 指定的数据的id
      * @param T 指定id的数据
      * @return bool get的结果
@@ -122,17 +125,17 @@ public:
     bool get(uint32_t uniqId, T & t,bool bErase = true);
 
     /**
-     * @brief 删除.
-     *
-     * @param uniqId 要删除的数据的id
+	 * @brief 删除.
+	 *
+	 * @param uniqId 要删除的数据的id
      * @param T     被删除的数据
      * @return bool 删除结果
      */
     bool erase(uint32_t uniqId, T & t);
 
     /**
-     * @brief 设置消息到队列尾端.
-     *
+	 * @brief 设置消息到队列尾端.
+	 *
      * @param ptr        要插入到队列尾端的消息
      * @param uniqId     序列号
      * @param timeout    超时时间
@@ -151,9 +154,9 @@ public:
     bool timeout(T & t);
 
     /**
-     * @brief 删除超时的数据，并用df对数据做处理
+	 * @brief 删除超时的数据，并用df对数据做处理
      */
-    void timeout(const data_functor &df);
+    void timeout(data_functor &df);
 
     /**
      * @brief 队列中的数据.
@@ -163,7 +166,7 @@ public:
     size_t size() const { return _data.size(); }
 
 protected:
-    uint32_t                        _uniqId;
+    atomic<uint32_t>                _uniqId;
     data_type                       _data;
     time_type                       _time;
     send_type                       _send;
@@ -224,11 +227,12 @@ template<typename T> bool TC_TimeoutQueueNew<T>::get(uint32_t uniqId, T & t, boo
 
 template<typename T> uint32_t TC_TimeoutQueueNew<T>::generateId()
 {
-    TC_LockT<TC_ThreadMutex> lock(*this);
+    uint32_t i = ++_uniqId;
+    if(i == 0) {
+        i = ++_uniqId;
+    }
 
-    while (++_uniqId == 0);
-
-    return _uniqId;
+    return i;
 }
 
 template<typename T> bool TC_TimeoutQueueNew<T>::push(T& ptr, uint32_t uniqId,int64_t timeout,bool hasSend)
@@ -295,7 +299,7 @@ template<typename T> bool TC_TimeoutQueueNew<T>::timeout(T & t)
     return true;
 }
 
-template<typename T> void TC_TimeoutQueueNew<T>::timeout(const data_functor& df)
+template<typename T> void TC_TimeoutQueueNew<T>::timeout(data_functor &df)
 {
     while(true)
     {

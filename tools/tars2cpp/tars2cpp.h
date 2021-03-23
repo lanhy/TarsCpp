@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -38,7 +38,7 @@ public:
      * 生成
      * @param file
      */
-    void createFile(const string &file, const vector<string> &vsCoder);
+    void createFile(const string &file);//, const vector<string> &vsCoder);
 
     /**
      * 设置生成文件的目录
@@ -52,6 +52,30 @@ public:
     void setCheckDefault(bool bCheck) { _checkDefault = bCheck; }
 
     /**
+     * 根据命令选项设置是否需要生成sql支持
+     */
+    void setSqlSupport(bool bSqlSupport) { _bSqlSupport  = bSqlSupport;}
+
+    /**
+     * 根据命令选项设置是否需要生成xml支持
+     */
+    void setXmlSupport(bool bXmlSupport, const vector<string>& vXmlIntf)
+    {
+        _bXmlSupport = bXmlSupport;
+        _vXmlIntf = vXmlIntf;
+    }
+
+    /**
+     * 根据命令选项设置是否需要生成json支持
+     */
+    void setJsonSupport(bool bJsonSupport) { _bJsonSupport = bJsonSupport; }
+
+    /**
+     * 根据命令选项设置是否需要生成json支持
+     */
+    void setJsonSupport(const vector<string>& vJsonIntf) { _vJsonIntf = vJsonIntf; }
+
+    /**
      * 设置是否只生成struct
      */
     void setOnlyStruct(bool bOnlyStruct) { _onlyStruct = bOnlyStruct; }
@@ -59,7 +83,7 @@ public:
     /**
      * setUnknownField for UnknownField support
      */
-    void setUnknownField(bool bUnkownField) { _unknownField = bUnkownField; }
+    // void setUnknownField(bool bUnkownField) { _unknownField = bUnkownField; }
 
     /**
      * added for master info
@@ -69,6 +93,53 @@ public:
 
     //下面是编解码的源码生成
 protected:
+    /**
+     * 生成xml
+     * @param pPtr
+     *
+     * @return string
+     */
+	string writeToXml(const TypeIdPtr &pPtr) const;
+
+    /**
+     * 生成xml
+     * @param pPtr
+     *
+     * @return string
+     */
+	string readFromXml(const TypeIdPtr &pPtr, bool bIsRequire = true) const;
+
+    /**
+     * 生成sql
+     * @param pPtr
+     *
+     * @return string
+     */
+	string writeToSql(const TypeIdPtr &pPtr) const;
+
+    /**
+     * 生成sql
+     * @param pPtr
+     *
+     * @return string
+     */
+	string readFromSql(const TypeIdPtr &pPtr, bool bIsRequire = true) const;
+
+    /**
+     * 生成json
+     * @param pPtr
+     *
+     * @return string
+     */
+    string writeToJson(const TypeIdPtr& pPtr) const;
+
+    /**
+     * 生成json
+     * @param pPtr
+     *
+     * @return string
+     */
+    string readFromJson(const TypeIdPtr& pPtr, bool bIsRequire = true) const;
 
     /**
      * 生成某类型的解码源码
@@ -92,7 +163,7 @@ protected:
      *
      * @return string
      */
-    string promiseReadFrom(const TypeIdPtr &pPtr, bool bIsRequire = true) const;
+    // string promiseReadFrom(const TypeIdPtr &pPtr, bool bIsRequire = true) const;
 
     /**
      *
@@ -100,14 +171,14 @@ protected:
      *
      * @return string
      */
-    string readUnknown(const TypeIdPtr &pPtr) const;
+    // string readUnknown(const TypeIdPtr &pPtr) const;
     /**
      *
      * @param pPtr
      *
      * @return string
      */
-    string writeUnknown()const;
+    // string writeUnknown()const;
     /**
      *
      * @param pPtr
@@ -333,7 +404,7 @@ protected:
      *
      * @return string
      */
-    string generateHPromiseAsync(const InterfacePtr &pInter, const OperationPtr &pPtr) const;
+//    string generateHPromiseAsync(const InterfacePtr &pInter, const OperationPtr &pPtr) const;
 
     /**
      * 生成操作函数调用分发的源码
@@ -342,7 +413,7 @@ protected:
      *
      * @return string
      */
-    string generateDispatchPromiseAsync(const OperationPtr &pPtr, const string &cn) const;
+//    string generateDispatchPromiseAsync(const OperationPtr &pPtr, const string &cn) const;
 
     /**
      * 生成操作的servant的头文件源码
@@ -403,23 +474,23 @@ protected:
      */
     StructPtr findStruct(const ContextPtr &pPtr,const string &id);
 
-    /**
-     *
-     * 生成接口编解码代码
-     * @param pPtr
-     * @param interface
-     */
-    void generateCoder(const ContextPtr &pPtr,const string &interface) const;
+    // /**
+    //  *
+    //  * 生成接口编解码代码
+    //  * @param pPtr
+    //  * @param interface
+    //  */
+    // void generateCoder(const ContextPtr &pPtr,const string &interface) const;
 
-    string generateCoder(const NamespacePtr &pPtr,const string & sInterface) const;
+    // string generateCoder(const NamespacePtr &pPtr,const string & sInterface) const;
 
-    string generateCoder(const InterfacePtr &pPtr) const;
+    // string generateCoder(const InterfacePtr &pPtr) const;
 
-    string generateCoder(const OperationPtr &pPtr) const;
+    // string generateCoder(const OperationPtr &pPtr) const;
 
     string generateInitValue(const TypeIdPtr &pPtr) const;
 
-    bool isPromiseDispatchInitValue(const TypeIdPtr &pPtr) const;
+//    bool isPromiseDispatchInitValue(const TypeIdPtr &pPtr) const;
 
 private:
     std::string _baseDir;
@@ -428,13 +499,21 @@ private:
 
     bool _onlyStruct;
 
+    bool _bSqlSupport;
+
+    bool _bXmlSupport;
+
+    bool _bJsonSupport;
+
+    vector<string>  _vJsonIntf;
+    vector<string>  _vXmlIntf;
+
+
     std::string _namespace ;
 
-    bool _unknownField;
+    // bool _unknownField;
 
     bool _tarsMaster;
 };
 
 #endif
-
-

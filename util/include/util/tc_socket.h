@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -17,15 +17,36 @@
 #ifndef __TC_SOCKET_H
 #define __TC_SOCKET_H
 
+#include "util/tc_platform.h"
+
+#if TARGET_PLATFORM_LINUX||TARGET_PLATFORM_IOS
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/un.h>
+
+typedef int SOCKET_TYPE;
+typedef socklen_t SOCKET_LEN_TYPE;
+
+#else
+
+#include <winsock2.h>
+#include <windows.h>
+#include <in6addr.h>
+#include <WS2tcpip.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+typedef SOCKET SOCKET_TYPE;
+typedef int SOCKET_LEN_TYPE;
+
+#endif
+
 #include <vector>
 #include <string>
-#include <sys/un.h>
 #include "util/tc_ex.h"
+#include "util/tc_common.h"
 using namespace std;
-
 namespace tars
 {
 /////////////////////////////////////////////////
@@ -56,6 +77,9 @@ struct TC_SocketConnect_Exception : public TC_Socket_Exception
     ~TC_SocketConnect_Exception() throw() {};
 };
 
+#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
+#define INVALID_SOCKET -1
+#endif
 
 /**
 * @brief  Socket类, 封装了socket的基本方法
@@ -114,7 +138,7 @@ public:
     *  
     * @return  socket句柄
     */
-    int getfd() const { return _sock; }
+    SOCKET_TYPE getfd() const { return _sock; }
 
     /**
     * @brief  socket是否有效. 
@@ -138,16 +162,50 @@ public:
     * @throws              TC_Socket_Exception
     * @return
     */
-    void getPeerName(string &sPeerAddress, uint16_t &iPeerPort);
+    void getPeerName(string &sPeerAddress, uint16_t &iPeerPort) const;
+
+#if TARGET_PLATFORM_LINUX||TARGET_PLATFORM_IOS
 
     /**
-    * @brief  获取对点的ip和端口,对AF_LOCAL的socket有效. 
-    *  
+    * @brief  获取对点的ip和端口,对AF_LOCAL的socket有效.
+    *
     * @param sPathName  文件路径
     * @throws           TC_Socket_Exception
     * @return
     */
-    void getPeerName(string &sPathName);
+    void getPeerName(string &sPathName) const;
+    /**
+     * @brief  获取socket文件路径,对AF_LOCAL的socket有效.
+     *
+     * @param sPathName
+     * @param TC_Socket_Exception
+     */
+    void getSockName(string &sPathName) const;
+
+    /**
+     * @brief  绑定域套接字,对AF_LOCAL的socket有效.
+     *
+     * @param sPathName
+     */
+    void bind(const char *sPathName);
+
+    /**
+     * @brief 连接本地套接字,对AF_LOCAL的socket有效(同步连接).
+     *
+     * @param sPathName
+     * @throws TC_Socket_Exception
+     */
+    void connect(const char *sPathName);
+
+    /**
+     * @brief 发起连接，连接失败的状态不通过异常返回,
+     *        通过connect的返回值,在异步连接的时候需要
+     * @param sPathName
+     * @throws TC_Socket_Exception:其他错误还是通过异常返回(例如),例如地址错误
+     * @return int
+     */
+    int connectNoThrow(const char *sPathName);
+#endif
 
     /**
     * @brief  获取自己的ip和端口,对AF_INET的socket有效. 
@@ -157,15 +215,7 @@ public:
     * @throws              TC_Socket_Exception
     * @return
     */
-    void getSockName(string &sSockAddress, uint16_t &iSockPort);
-
-    /**
-     * @brief  获取socket文件路径,对AF_LOCAL的socket有效. 
-     *  
-     * @param sPathName
-     * @param TC_Socket_Exception
-     */
-    void getSockName(string &sPathName);
+    void getSockName(string &sSockAddress, uint16_t &iSockPort) const;
 
     /**
     * @brief  修改socket选项. 
@@ -176,7 +226,7 @@ public:
     * @param level     socket操作层次, 默认是socket层
     * @return int
     */
-    int setSockOpt(int opt, const void *pvOptVal, socklen_t optLen, int level = SOL_SOCKET);
+    int setSockOpt(int opt, const void *pvOptVal, SOCKET_LEN_TYPE optLen, int level = SOL_SOCKET);
 
     /**
     * @brief  获取socket选项值. 
@@ -187,7 +237,7 @@ public:
     * @param level     socket操作层次, 默认是socket层
     * @return          socket选项值
     */
-    int getSockOpt(int opt, void *pvOptVal, socklen_t &optLen, int level = SOL_SOCKET);
+    int getSockOpt(int opt, void *pvOptVal, SOCKET_LEN_TYPE &optLen, int level = SOL_SOCKET) const;
 
     /**
     * @brief  accept. 
@@ -197,7 +247,7 @@ public:
     * @param iSockLen     pstSockAddr长度
     * @return             int : > 0 ,客户端socket; <0, 出错
     */
-    int accept(TC_Socket &tcSock, struct sockaddr *pstSockAddr, socklen_t &iSockLen);
+    SOCKET_TYPE accept(TC_Socket &tcSock, struct sockaddr *pstSockAddr, SOCKET_LEN_TYPE &iSockLen);
 
     /**
     * @brief 绑定,对AF_INET的socket有效. 
@@ -210,13 +260,6 @@ public:
     void bind(const string &sServerAddr, int port);
 
     /**
-     * @brief  绑定域套接字,对AF_LOCAL的socket有效. 
-     *  
-     * @param sPathName
-     */
-    void bind(const char *sPathName);
-
-    /**
     * @brief  连接其他服务,对AF_INET的socket有效(同步连接). 
     *  
     * @param sServerAddr  ip地址
@@ -225,14 +268,6 @@ public:
     * @return
     */
     void connect(const string &sServerAddr, uint16_t port);
-
-    /**
-     * @brief 连接本地套接字,对AF_LOCAL的socket有效(同步连接). 
-     *  
-     * @param sPathName
-     * @throws TC_Socket_Exception
-     */
-    void connect(const char *sPathName);
 
     /**
      * @brief 发起连接，连接失败的状态不通过异常返回, 
@@ -245,7 +280,6 @@ public:
      */
     int connectNoThrow(const string &sServerAddr, uint16_t port);
 
-
     /**
      * @brief 发起连接，连接失败的状态不通过异常返回, 
      *        通过connect的返回值,在异步连接的时候需要
@@ -254,16 +288,7 @@ public:
      *        其他错误还是通过异常返回(例如),例如地址错误
      * @return int
      */
-    int connectNoThrow(struct sockaddr* addr);
-
-    /**
-     * @brief 发起连接，连接失败的状态不通过异常返回, 
-     *        通过connect的返回值,在异步连接的时候需要
-     * @param sPathName
-     * @throws TC_Socket_Exception:其他错误还是通过异常返回(例如),例如地址错误
-     * @return int
-     */
-    int connectNoThrow(const char *sPathName);
+    int connectNoThrow(const struct sockaddr* addr);
 
     /**
     * @brief 在socket上监听. 
@@ -272,6 +297,16 @@ public:
     * @throws             TC_Socket_Exception
     */
     void listen(int connBackLog);
+
+    /**
+    * @brief 绑定.
+    *
+    * @param pstBindAddr  需要绑定的地址
+    * @param iAddrLen      pstBindAddr指向的结构的长度
+    * @throws              TC_Socket_Exception
+    * @return
+    */
+    void bind(const struct sockaddr *pstBindAddr, SOCKET_LEN_TYPE iAddrLen);
 
     /**
     * @brief  接收数据(一般用于tcp). 
@@ -315,7 +350,7 @@ public:
     * @param iFlag       标示
     * @return int        接收了的数据长度
     */
-    int recvfrom(void *pvBuf, size_t iLen, struct sockaddr *pstFromAddr, socklen_t &iFromLen, int iFlags = 0);
+    int recvfrom(void *pvBuf, size_t iLen, struct sockaddr *pstFromAddr, SOCKET_LEN_TYPE &iFromLen, int iFlags = 0);
 
     /**
     * @brief 发送数据(一般用于udp). 
@@ -339,7 +374,7 @@ public:
     * @param iFlag      标示
     * @return           int : >0 发送的数据长度 ;<=0, 出错
     */
-    int sendto(const void *pvBuf, size_t iLen, struct sockaddr *pstToAddr, socklen_t iToLen, int iFlags = 0);
+    int sendto(const void *pvBuf, size_t iLen, struct sockaddr *pstToAddr, SOCKET_LEN_TYPE iToLen, int iFlags = 0);
 
     /**
     * @brief 关闭. 
@@ -403,7 +438,7 @@ public:
     * @throws TC_Socket_Exception
     * @return recv buffer 的大小
     */
-    int getRecvBufferSize();
+    int getRecvBufferSize() const;
 
     /**
     * @brief 设置recv buffer 大小. 
@@ -417,7 +452,7 @@ public:
     * @param 发送buffer大小  
     * @throws TC_Socket_Exception 
      */
-    int getSendBufferSize();
+    int getSendBufferSize() const;
 
     /**
      * @brief 设置发送buffer大小. 
@@ -428,12 +463,9 @@ public:
     void setSendBufferSize(int sz);
 
     /**
-     * @brief  获取本地所有ip.
-     * 
-     * @throws TC_Socket_Exception
-     * @return 本地所有ip
+     * @brief 忽略SIGPIPE.
      */
-    static vector<string> getLocalHosts(int domain = AF_INET);
+    void ignoreSigPipe();
 
     /**
     * @brief 设置socket方式. 
@@ -443,11 +475,18 @@ public:
     * @throws        TC_Socket_Exception
     * @return
     */
-    static void setblock(int fd, bool bBlock);
+    static void setblock(SOCKET_TYPE fd, bool bBlock);
+
+    /**
+     * @brief  获取本地所有ip.
+     *
+     * @throws TC_Socket_Exception
+     * @return 本地所有ip
+     */
+    static vector<string> getLocalHosts(int domain = AF_INET);
 
     /**
      * @brief 生成管道,抛出异常时会关闭fd. 
-     *  
      * @param fds    句柄
      * @param bBlock true, 阻塞; false, 非阻塞
      * @throws       TC_Socket_Exception
@@ -489,14 +528,36 @@ public:
     }
 
     /**
-    * @brief 绑定. 
-    *  
-    * @param pstBindAddr  需要绑定的地址
-    * @param iAddrLen      pstBindAddr指向的结构的长度
-    * @throws              TC_Socket_Exception
+    * @brief 解析地址, 从字符串(ip或域名)端口, 解析到sockaddr_in结构.
+    *
+    * @param sAddr   字符串
+    * @param stAddr  地址
+    * @throws        TC_Socket_Exception
     * @return
     */
-    void bind(struct sockaddr *pstBindAddr, socklen_t iAddrLen);
+	static void parseAddrWithPort(const string& host, int port, struct sockaddr_in& addr);
+	static void parseAddrWithPort(const string& host, int port, struct sockaddr_in6& addr);
+
+	/**
+    * @brief 判断当前socket是否处于EAGAIN/WSAEWOULDBLOCK(异步send/recv函数返回值时判断)
+    *
+    * @return
+    */
+    static bool isPending();
+
+    /**
+    * @brief 判断当前socket是否处于EINPROGRESS/WSAEWOULDBLOC(异步connect返回值时判断)
+    *
+    * @return
+    */
+    static bool isInProgress();
+
+    /**
+    * @brief 关闭句柄
+    *
+    * @return
+    */
+    static void closeSocketNoThrow(int);
 
     #if 0
     /**
@@ -521,7 +582,7 @@ protected:
     * @param serverLen      pstServerAddr指向的结构的长度
     * @return int
     */
-    int connect(struct sockaddr *pstServerAddr, socklen_t serverLen);    
+    int connect(const struct sockaddr *pstServerAddr, SOCKET_LEN_TYPE serverLen);    
 
     /**
     * @brief 获取对点的地址. 
@@ -531,7 +592,7 @@ protected:
     * @throws            TC_Socket_Exception
     * @return 
     */
-    void getPeerName(struct sockaddr *pstPeerAddr, socklen_t &iPeerLen);
+    void getPeerName(struct sockaddr *pstPeerAddr, SOCKET_LEN_TYPE &iPeerLen) const;
 
     /**
     * @brief 获取自己的的ip和端口. 
@@ -541,17 +602,14 @@ protected:
     * @throws            TC_Socket_Exception
     * @return
     */
-    void getSockName(struct sockaddr *pstSockAddr, socklen_t &iSockLen);
-
-private:
+    void getSockName(struct sockaddr *pstSockAddr, SOCKET_LEN_TYPE &iSockLen) const;
 
 protected:
-    static const int INVALID_SOCKET = -1;
 
     /**
      * socket句柄
      */
-    int  _sock;
+    SOCKET_TYPE  _sock;
 
     /**
      * 是否拥有socket

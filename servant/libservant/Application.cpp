@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -16,7 +16,7 @@
 
 #include "util/tc_option.h"
 #include "util/tc_common.h"
-#include "servant/TarsNodeF.h"
+#include "servant/KeepAliveNodeF.h"
 #include "servant/Application.h"
 #include "servant/AppProtocol.h"
 #include "servant/AdminServant.h"
@@ -24,23 +24,45 @@
 #include "servant/BaseF.h"
 #include "servant/AppCache.h"
 #include "servant/NotifyObserver.h"
+#include "servant/AuthLogic.h"
 
 #include <signal.h>
+#if TARGET_PLATFORM_LINUX
 #include <sys/resource.h>
+#endif
+
+#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
+#include <fcntl.h>
+#endif
+
 
 #if TARS_SSL
-#include "util/tc_sslmgr.h"
+#include "util/tc_openssl.h"
 #endif
 
 
 namespace tars
 {
 
-static void sighandler( int sig_no )
-{
-    Application::terminate();
-}
+//#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
+//static void sighandler( int sig_no )
+//{
+//	TLOGERROR("[TARS][sighandler] sig_no :" << sig_no << endl);
+//
+//    Application::terminate();
+//}
+//#else
+//static BOOL WINAPI HandlerRoutine(DWORD dwCtrlType)
+//{
+//	TLOGERROR("[TARS][sighandler] dwCtrlType :" << dwCtrlType << endl);
+//	Application::terminate();
+//	ExitProcess(0);
+//	return TRUE;
+//}
+//#endif
 
+
+std::string ServerConfig::TarsPath;         //服务路径
 std::string ServerConfig::Application;      //应用名称
 std::string ServerConfig::ServerName;       //服务名称,一个服务名称含一个或多个服务标识
 std::string ServerConfig::LocalIp;          //本机IP
@@ -54,135 +76,164 @@ std::string ServerConfig::Notify;           //信息通知中心
 std::string ServerConfig::LogPath;          //logpath
 int         ServerConfig::LogSize;          //log大小(字节)
 int         ServerConfig::LogNum;           //log个数()
-std::string ServerConfig::LogLevel;            //log日志级别
+std::string ServerConfig::LogLevel;         //log日志级别
 std::string ServerConfig::ConfigFile;       //框架配置文件路径
-int         ServerConfig::ReportFlow;       //是否服务端上报所有接口stat流量 0不上报 1上报 (用于非tars协议服务流量统计)
-int         ServerConfig::IsCheckSet;       //是否对按照set规则调用进行合法性检查 0,不检查，1检查
-bool        ServerConfig::OpenCoroutine;    //是否启用协程处理方式
+int         ServerConfig::ReportFlow = 1;       //是否服务端上报所有接口stat流量 0不上报 1上报 (用于非taf协议服务流量统计)
+int         ServerConfig::IsCheckSet = 1;       //是否对按照set规则调用进行合法性检查 0,不检查，1检查
+bool        ServerConfig::OpenCoroutine = false;    //是否启用协程处理方式
 size_t      ServerConfig::CoroutineMemSize; //协程占用内存空间的最大大小
 uint32_t    ServerConfig::CoroutineStackSize;   //每个协程的栈大小(默认128k)
+bool        ServerConfig::ManualListen = false;     //手工启动监听端口
+bool        ServerConfig::MergeNetImp = false;     //合并网络和处理线程
+int         ServerConfig::NetThread = 1;               //servernet thread
+bool        ServerConfig::CloseCout = true;
+int         ServerConfig::BackPacketLimit = 0;
+int         ServerConfig::BackPacketMin = 1024;
 
-static string outfill(const string& s, char c = ' ', int n = 29)
-{
-    return (s + string(abs(n - (int)s.length()), c));
-}
+#if TARS_SSL
+std::string ServerConfig::CA;
+std::string ServerConfig::Cert;
+std::string ServerConfig::Key;
+bool ServerConfig::VerifyClient = false;
+std::string ServerConfig::Ciphers;
+#endif
 
-#define OUT_LINE        (outfill("", '-', 50))
-#define OUT_LINE_LONG   (outfill("", '=', 50))
+map<string, string> ServerConfig::Context;
 
 ///////////////////////////////////////////////////////////////////////////////////////////
-TC_Config                       Application::_conf;
-TC_EpollServerPtr               Application::_epollServer  = NULL;
+//TC_Config                       Application::_conf;
+//TC_EpollServerPtr               Application::_epollServer  = NULL;
 CommunicatorPtr                 Application::_communicator = NULL;
+
+PropertyReportPtr g_pReportRspQueue;
+
+/**上报服务端发送队列大小的间隔时间**/
+#define REPORT_SEND_QUEUE_INTERVAL 10
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 Application::Application()
 {
+#if TARGET_PLATFORM_WINDOWS    
+    WSADATA wsadata;
+    WSAStartup(MAKEWORD(2, 2), &wsadata);
+#endif
+	_servantHelper = std::make_shared<ServantHelperManager>();
+
+	_notifyObserver = std::make_shared<NotifyObserver>();
+
+	setNotifyObserver(_notifyObserver);
+
 }
 
 Application::~Application()
 {
     terminate();
+#if TARGET_PLATFORM_WINDOWS    
+    WSACleanup();
+#endif
 }
 
-TC_Config& Application::getConfig()
+string Application::getTarsVersion()
 {
-    return _conf;
+    return TARS_VERSION;
 }
-
-TC_EpollServerPtr& Application::getEpollServer()
-{
-    return _epollServer;
-}
+//
+//TC_Config& Application::getConfig()
+//{
+//    return _conf;
+//}
+//
+//TC_EpollServerPtr& Application::getEpollServer()
+//{
+//    return _epollServer;
+//}
 
 CommunicatorPtr& Application::getCommunicator()
 {
     return _communicator;
 }
 
-void Application::waitForQuit()
+void reportRspQueue(TC_EpollServer *epollServer)
 {
-    int64_t iLastCheckTime = TNOW;
-    int64_t iNow = iLastCheckTime;
+    // TLOGDEBUG("Application::reportRspQueue" << endl);
 
-    unsigned int iNetThreadNum = _epollServer->getNetThreadNum();
-    vector<TC_EpollServer::NetThread*> vNetThread = _epollServer->getNetThread();
+    if (!g_pReportRspQueue)
+        return;
 
-    for (size_t i = 0; i < iNetThreadNum; ++i)
+    static time_t iLastCheckTime = TNOW;
+
+    time_t iNow = TNOW;
+
+    if (iNow - iLastCheckTime > REPORT_SEND_QUEUE_INTERVAL)
     {
-        vNetThread[i]->start();
+        iLastCheckTime = iNow;
+
+        const vector<TC_EpollServer::BindAdapterPtr> &adapters = epollServer->getBindAdapters();
+
+        size_t n = 0;
+        for (size_t i = 0; i < adapters.size(); ++i)
+        {
+            n = n + adapters[i]->getSendBufferSize();
+        }
+
+        g_pReportRspQueue->report((int)n);
     }
+}
 
-    _epollServer->debug("server netthread num : " + TC_Common::tostr(iNetThreadNum));
+void heartBeatFunc(const string& adapterName)
+{
+    TARS_KEEPALIVE(adapterName);
+}
 
-    while(!_epollServer->isTerminate())
+void Application::manualListen()
+{
+    vector<TC_EpollServer::BindAdapterPtr> v = getEpollServer()->getBindAdapters();
+
+    for(auto &b : v)
     {
-        {
-            TC_ThreadLock::Lock sync(*_epollServer);
-            _epollServer->timedWait(5000);
-        }
-
-        iNow = TNOW;
-
-        if(iNow - iLastCheckTime > REPORT_SEND_QUEUE_INTERVAL)
-        {
-            iLastCheckTime = iNow;
-
-            size_t n = 0;
-            for(size_t i = 0;i < iNetThreadNum; ++i)
-            {
-                n = n + vNetThread[i]->getSendRspSize();
-            }
-
-            if(_epollServer->_pReportRspQueue)
-            {
-                _epollServer->_pReportRspQueue->report(n);
-            }
-        }
-    }
-
-    if(_epollServer->isTerminate())
-    {
-        for(size_t i = 0; i < iNetThreadNum; ++i)
-        {
-            vNetThread[i]->terminate();
-            vNetThread[i]->getThreadControl().join();
-        }
-
-        _epollServer->stopThread();
+        b->manualListen();
     }
 }
 
 void Application::waitForShutdown()
 {
-    waitForQuit();
+    _epollServer->setCallbackFunctor(reportRspQueue);
+
+    _epollServer->setHeartBeatFunctor(heartBeatFunc);
+
+    _epollServer->waitForShutdown();
 
     destroyApp();
 
-    TarsRemoteNotify::getInstance()->report("stop", true);
+    RemoteNotify::getInstance()->report("stop");
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(100)); //稍微休息一下, 让当前处理包能够回复
+
 }
 
 void Application::terminate()
 {
-    if(_epollServer)
+    if (_epollServer && !_epollServer->isTerminate())
     {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100)); //稍微休息一下, 让当前处理包能够回复
+
         _epollServer->terminate();
     }
 }
 
 bool Application::cmdViewStatus(const string& command, const string& params, string& result)
 {
-    TLOGINFO("Application::cmdViewStatus:" << command << " " << params << endl);
+    TLOGTARS("Application::cmdViewStatus:" << command << " " << params << endl);
 
     ostringstream os;
 
     os << OUT_LINE_LONG << endl;
 
-    os << outfill("[proxy config]:") << endl;
+    os << TC_Common::outfill("[proxy config]:") << endl;
 
     outClient(os);
 
-    os << OUT_LINE << "\n" << outfill("[server config]:") << endl;
+    os << OUT_LINE << "\n" << TC_Common::outfill("[server config]:") << endl;
 
     outServer(os);
 
@@ -194,30 +245,32 @@ bool Application::cmdViewStatus(const string& command, const string& params, str
 
     return true;
 }
+
 bool Application::cmdCloseCoreDump(const string& command, const string& params, string& result)
 {
+#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
     struct rlimit tlimit;
-    int ret=0;
+    int ret = 0;
     ostringstream os;
 
-    ret = getrlimit(RLIMIT_CORE,&tlimit);
-    if(ret != 0)
+    ret = getrlimit(RLIMIT_CORE, &tlimit);
+    if (ret != 0)
     {
         TLOGERROR("error: "<<strerror(errno)<<endl);
         return false;
     }
 
-    TLOGDEBUG("before :cur:"<<tlimit.rlim_cur<<";max: "<<tlimit.rlim_max<<endl);
+    TLOGDEBUG("before :cur:" << tlimit.rlim_cur << ";max: " << tlimit.rlim_max << endl);
 
-    os<<(ServerConfig::Application+"."+ServerConfig::ServerName);
+    os << (ServerConfig::Application + "." + ServerConfig::ServerName);
 
-    os<<"|before set:cur:"<<tlimit.rlim_cur<<";max: "<<tlimit.rlim_max;
+    os << "|before set:cur:" << tlimit.rlim_cur << ";max: " << tlimit.rlim_max;
 
     string param = TC_Common::lower(TC_Common::trim(params));
 
-    bool bClose = (param == "yes")?true:false;
+    bool bClose = (param == "yes") ? true : false;
 
-    if(bClose)
+    if (bClose)
     {
         tlimit.rlim_cur = 0;
     }
@@ -227,42 +280,44 @@ bool Application::cmdCloseCoreDump(const string& command, const string& params, 
     }
 
 
-    ret =setrlimit(RLIMIT_CORE,&tlimit);
-    if(ret != 0)
+    ret = setrlimit(RLIMIT_CORE, &tlimit);
+    if (ret != 0)
     {
         TLOGERROR("error: "<<strerror(errno)<<endl);
        return false;
     }
 
-    ret = getrlimit(RLIMIT_CORE,&tlimit);
-    if(ret != 0)
+    ret = getrlimit(RLIMIT_CORE, &tlimit);
+    if (ret != 0)
     {
         TLOGERROR("error: "<<strerror(errno)<<endl);
         return false;
     }
 
-    TLOGDEBUG("after cur:"<<tlimit.rlim_cur<<";max: "<<tlimit.rlim_max<<endl);
-    os <<"|after set cur:"<<tlimit.rlim_cur<<";max: "<<tlimit.rlim_max<<endl;
+    TLOGDEBUG("after cur:" << tlimit.rlim_cur << ";max: " << tlimit.rlim_max << endl);
+    os << "|after set cur:" << tlimit.rlim_cur << ";max: " << tlimit.rlim_max << endl;
 
     result = os.str();
-
+#else
+	TLOGDEBUG("windows not support!");
+#endif
     return true;
 }
 bool Application::cmdSetLogLevel(const string& command, const string& params, string& result)
 {
-    TLOGINFO("Application::cmdSetLogLevel:" << command << " " << params << endl);
+    TLOGTARS("Application::cmdSetLogLevel:" << command << " " << params << endl);
 
     string level = TC_Common::trim(params);
 
-    int ret = TarsRollLogger::getInstance()->logger()->setLogLevel(level);
+    int ret = LocalRollLogger::getInstance()->logger()->setLogLevel(level);
 
-    if(ret == 0)
+    if (ret == 0)
     {
         ServerConfig::LogLevel = TC_Common::upper(level);
 
         result = "set log level [" + level + "] ok";
 
-        AppCache::getInstance()->set("logLevel",level);
+        AppCache::getInstance()->set("logLevel", level);
     }
     else
     {
@@ -274,13 +329,13 @@ bool Application::cmdSetLogLevel(const string& command, const string& params, st
 
 bool Application::cmdEnableDayLog(const string& command, const string& params, string& result)
 {
-    TLOGINFO("Application::cmdEnableDayLog:" << command << " " << params << endl);
+    TLOGTARS("Application::cmdEnableDayLog:" << command << " " << params << endl);
 
-    vector<string> vParams = TC_Common::sepstr<string>(TC_Common::trim(params),"|");
+    vector<string> vParams = TC_Common::sepstr<string>(TC_Common::trim(params), "|");
 
     size_t nNum = vParams.size();
 
-    if(!(nNum == 2 || nNum == 3))
+    if (!(nNum == 2 || nNum == 3))
     {
         result = "usage: tars.enabledaylog {remote|local}|[logname]|{true|false}";
         return false;
@@ -324,13 +379,13 @@ bool Application::cmdEnableDayLog(const string& command, const string& params, s
 
     if(vParams[0] == "local")
     {
-        TarsTimeLogger::getInstance()->enableLocal(sFile,bEnable);
+        RemoteTimeLogger::getInstance()->enableLocal(sFile,bEnable);
         return true;
     }
 
     if(vParams[0] == "remote")
     {
-        TarsTimeLogger::getInstance()->enableRemote(sFile,bEnable);
+        RemoteTimeLogger::getInstance()->enableRemote(sFile,bEnable);
         return true;
     }
 
@@ -341,49 +396,55 @@ bool Application::cmdEnableDayLog(const string& command, const string& params, s
 
 bool Application::cmdLoadConfig(const string& command, const string& params, string& result)
 {
-    TLOGINFO("Application::cmdLoadConfig:" << command << " " << params << endl);
+    TLOGTARS("Application::cmdLoadConfig:" << command << " " << params << endl);
 
     string filename = TC_Common::trim(params);
 
-    if (TarsRemoteConfig::getInstance()->addConfig(filename, result,false))
+    if (RemoteConfig::getInstance()->addConfig(filename, result,false))
     {
-        TarsRemoteNotify::getInstance()->report(result);
+        RemoteNotify::getInstance()->report(result);
 
         return true;
     }
 
-    TarsRemoteNotify::getInstance()->report(result);
+    RemoteNotify::getInstance()->report(result);
 
     return true;
 }
 
 bool Application::cmdConnections(const string& command, const string& params, string& result)
 {
-    TLOGINFO("Application::cmdConnections:" << command << " " << params << endl);
+    TLOGTARS("Application::cmdConnections:" << command << " " << params << endl);
 
     ostringstream os;
 
     os << OUT_LINE_LONG << endl;
 
-    map<int, TC_EpollServer::BindAdapterPtr> m = _epollServer->getListenSocketInfo();
+    auto m = _epollServer->getListenSocketInfo();
 
-    for(map<int, TC_EpollServer::BindAdapterPtr>::const_iterator it = m.begin(); it != m.end(); ++it)
+    for (auto it = m.begin(); it != m.end(); ++it)
     {
         vector<TC_EpollServer::ConnStatus> v = it->second->getConnStatus();
 
-        os << OUT_LINE << "\n" << outfill("[adater:" + it->second->getName() + "] [connections:" + TC_Common::tostr(v.size())+ "]") << endl;
+        os << OUT_LINE << "\n" << TC_Common::outfill("[adater:" + it->second->getName() + "] [connections:" + TC_Common::tostr(v.size()) + "]") << endl;
 
-        os  << outfill("conn-uid", ' ', 15)
-            << outfill("ip:port", ' ', 25)
-            << outfill("last-time", ' ', 25)
-            << outfill("timeout", ' ', 10) << endl;
+        os  << TC_Common::outfill("conn-uid", ' ', 15)
+            << TC_Common::outfill("ip:port", ' ', 25)
+            << TC_Common::outfill("last-time", ' ', 25)
+            << TC_Common::outfill("timeout", ' ', 10)
+	        << TC_Common::outfill("recvBufferSize", ' ', 30)
+	        << TC_Common::outfill("sendBufferSize", ' ', 30)
+	        << endl;
 
-        for(size_t i = 0; i < v.size(); i++)
+        for (size_t i = 0; i < v.size(); i++)
         {
-            os  << outfill(TC_Common::tostr<uint32_t>(v[i].uid), ' ', 15)
-                << outfill(v[i].ip + ":" + TC_Common::tostr(v[i].port), ' ', 25)
-                << outfill(TC_Common::tm2str(v[i].iLastRefreshTime,"%Y-%m-%d %H:%M:%S"), ' ', 25)
-                << outfill(TC_Common::tostr(v[i].timeout), ' ', 10) << endl;
+            os  << TC_Common::outfill(TC_Common::tostr<uint32_t>(v[i].uid), ' ', 15)
+                << TC_Common::outfill(v[i].ip + ":" + TC_Common::tostr(v[i].port), ' ', 25)
+                << TC_Common::outfill(TC_Common::tm2str(v[i].iLastRefreshTime, "%Y-%m-%d %H:%M:%S"), ' ', 25)
+                << TC_Common::outfill(TC_Common::tostr(v[i].timeout), ' ', 10)
+	            << TC_Common::outfill(TC_Common::tostr(v[i].recvBufferSize), ' ', 30)
+	            << TC_Common::outfill(TC_Common::tostr(v[i].sendBufferSize), ' ', 30)
+	            << endl;
         }
     }
     os << OUT_LINE_LONG << endl;
@@ -399,11 +460,38 @@ bool Application::cmdViewVersion(const string& command, const string& params, st
     return true;
 }
 
+bool Application::cmdViewBuildID(const string& command, const string& params, string& result)
+{
+    #define YEARSUF ((__DATE__ [9] - '0') * 10 + (__DATE__ [10] - '0'))
+
+    #define MONTH (__DATE__ [2] == 'n' ? (__DATE__ [1] == 'a' ? 0 : 5)  \
+        : __DATE__ [2] == 'b' ? 1 \
+        : __DATE__ [2] == 'r' ? (__DATE__ [0] == 'M' ? 2 : 3) \
+        : __DATE__ [2] == 'y' ? 4 \
+        : __DATE__ [2] == 'l' ? 6 \
+        : __DATE__ [2] == 'g' ? 7 \
+        : __DATE__ [2] == 'p' ? 8 \
+        : __DATE__ [2] == 't' ? 9 \
+        : __DATE__ [2] == 'v' ? 10 : 11)
+
+    #define DAY ((__DATE__ [4] == ' ' ? 0 : __DATE__ [4] - '0') * 10 \
+        + (__DATE__ [5] - '0'))
+
+	#define TIMEINT ((((((__TIME__[0] - '0') * 10 + (__TIME__[1] - '0')) * 10 \
+        + (__TIME__[3] - '0')) * 10 + (__TIME__[4] - '0')) * 10 \
+        + (__TIME__[6] - '0')) * 10 + (__TIME__[7] - '0'))
+
+    char buildTime[50] = {0};
+    sprintf(buildTime, "%d.%02d%02d.%06d", YEARSUF, MONTH + 1, DAY, TIMEINT);
+    result = "$" + ServerConfig::Application + "." + ServerConfig::ServerName + "-" + string(buildTime) + "$";
+    return true;
+}
+
 bool Application::cmdLoadProperty(const string& command, const string& params, string& result)
 {
     try
     {
-        TLOGINFO("Application::cmdLoadProperty:" << command << " " << params << endl);
+        TLOGTARS("Application::cmdLoadProperty:" << command << " " << params << endl);
 
         //重新解析配置文件
         _conf.parseFile(ServerConfig::ConfigFile);
@@ -418,15 +506,15 @@ bool Application::cmdLoadProperty(const string& command, const string& params, s
         //加载远程对象
         ServerConfig::Log = _conf.get("/tars/application/server<log>");
 
-        TarsTimeLogger::getInstance()->setLogInfo(_communicator, ServerConfig::Log, ServerConfig::Application, ServerConfig::ServerName, ServerConfig::LogPath,setDivision());
+        RemoteTimeLogger::getInstance()->setLogInfo(_communicator, ServerConfig::Log, ServerConfig::Application, ServerConfig::ServerName, ServerConfig::LogPath,setDivision());
 
         ServerConfig::Config = _conf.get("/tars/application/server<config>");
 
-        TarsRemoteConfig::getInstance()->setConfigInfo(_communicator, ServerConfig::Config, ServerConfig::Application, ServerConfig::ServerName, ServerConfig::BasePath,setDivision());
+        RemoteConfig::getInstance()->setConfigInfo(_communicator, ServerConfig::Config, ServerConfig::Application, ServerConfig::ServerName, ServerConfig::BasePath,setDivision(), 5);
 
         ServerConfig::Notify = _conf.get("/tars/application/server<notify>");
 
-        TarsRemoteNotify::getInstance()->setNotifyInfo(_communicator, ServerConfig::Notify, ServerConfig::Application, ServerConfig::ServerName, setDivision());
+        RemoteNotify::getInstance()->setNotifyInfo(_communicator, ServerConfig::Notify, ServerConfig::Application, ServerConfig::ServerName, setDivision(), ServerConfig::LocalIp);
 
         result = "loaded config items:\r\n" + sResult +
                  "log=" + ServerConfig::Log + "\r\n" +
@@ -446,9 +534,9 @@ bool Application::cmdLoadProperty(const string& command, const string& params, s
 
 bool Application::cmdViewAdminCommands(const string& command, const string& params, string& result)
 {
-    TLOGINFO("Application::cmdViewAdminCommands:" << command << " " << params << endl);
+    TLOGTARS("Application::cmdViewAdminCommands:" << command << " " << params << endl);
 
-    result =result +  NotifyObserver::getInstance()->viewRegisterCommand();
+    result =result +  _notifyObserver->viewRegisterCommand();
 
     return true;
 }
@@ -459,7 +547,7 @@ bool Application::cmdSetDyeing(const string& command, const string& params, stri
 
     if(vDyeingParams.size() == 2 || vDyeingParams.size() == 3)
     {
-        ServantHelperManager::getInstance()->setDyeing(vDyeingParams[0], vDyeingParams[1], vDyeingParams.size() == 3 ? vDyeingParams[2] : "");
+        _servantHelper->setDyeing(vDyeingParams[0], vDyeingParams[1], vDyeingParams.size() == 3 ? vDyeingParams[2] : "");
 
         result = "DyeingKey="       + vDyeingParams[0] + "\r\n" +
                  "DyeingServant="   + vDyeingParams[1] + "\r\n" +
@@ -474,7 +562,7 @@ bool Application::cmdSetDyeing(const string& command, const string& params, stri
 
 bool Application::cmdCloseCout(const string& command, const string& params, string& result)
 {
-    TLOGINFO("Application::cmdCloseCout:" << command << " " << params << endl);
+    TLOGTARS("Application::cmdCloseCout:" << command << " " << params << endl);
 
     string s = TC_Common::lower(TC_Common::trim(params));
 
@@ -494,7 +582,7 @@ bool Application::cmdCloseCout(const string& command, const string& params, stri
 
 bool Application::cmdReloadLocator(const string& command, const string& params, string& result)
 {
-    TLOGINFO("Application::cmdReloadLocator:" << command << " " << params << endl);
+    TLOGTARS("Application::cmdReloadLocator:" << command << " " << params << endl);
 
     string sPara = TC_Common::lower(TC_Common::trim(params));
 
@@ -506,7 +594,7 @@ bool Application::cmdReloadLocator(const string& command, const string& params, 
         reloadConf.parseFile(ServerConfig::ConfigFile);
         string sLocator = reloadConf.get("/tars/application/client/<locator>", "");
 
-        TLOGINFO(__FUNCTION__ << "|" << __LINE__ << "|conf file:" << ServerConfig::ConfigFile << "\n"
+        TLOGDEBUG(__FUNCTION__ << "|" << __LINE__ << "|conf file:" << ServerConfig::ConfigFile << "\n"
             << "|sLocator:" << sLocator << endl);
 
         if (sLocator.empty())
@@ -531,13 +619,38 @@ bool Application::cmdReloadLocator(const string& command, const string& params, 
     return bSucc;
 }
 
+bool Application::cmdViewResource(const string& command, const string& params, string& result)
+{
+	TLOGDEBUG("Application::cmdViewResource:" << command << " " << params << endl);
+
+	ostringstream os;
+
+	os << _communicator->getResourcesInfo() << endl;
+
+	os << OUT_LINE << endl;
+
+	vector<TC_EpollServer::BindAdapterPtr> adapters = _epollServer->getBindAdapters();
+	for(auto adapter : adapters)
+	{
+		outAdapter(os, _servantHelper->getAdapterServant(adapter->getName()), adapter);
+		os << TC_Common::outfill("recv-buffer-count") << adapter->getRecvBufferSize() << endl;
+		os << TC_Common::outfill("send-buffer-count") << adapter->getSendBufferSize() << endl;
+	}
+
+	result += os.str();
+
+	TLOGDEBUG("Application::cmdViewResource result:" << result << endl);
+
+	return true;
+}
+
 void Application::outAllAdapter(ostream &os)
 {
-    map<int, TC_EpollServer::BindAdapterPtr> m = _epollServer->getListenSocketInfo();
+    auto m = _epollServer->getListenSocketInfo();
 
-    for(map<int, TC_EpollServer::BindAdapterPtr>::const_iterator it = m.begin(); it != m.end(); ++it)
+    for (auto it = m.begin(); it != m.end(); ++it)
     {
-        outAdapter(os, ServantHelperManager::getInstance()->getAdapterServant(it->second->getName()),it->second);
+        outAdapter(os, _servantHelper->getAdapterServant(it->second->getName()), it->second);
 
         os << OUT_LINE << endl;
     }
@@ -547,13 +660,13 @@ bool Application::addConfig(const string &filename)
 {
     string result;
 
-    if (TarsRemoteConfig::getInstance()->addConfig(filename, result, false))
+    if (RemoteConfig::getInstance()->addConfig(filename, result, false))
     {
-        TarsRemoteNotify::getInstance()->report(result);
+        RemoteNotify::getInstance()->report(result);
 
         return true;
     }
-    TarsRemoteNotify::getInstance()->report(result);
+    RemoteNotify::getInstance()->report(result);
 
     return true;
 }
@@ -563,35 +676,60 @@ bool Application::addAppConfig(const string &filename)
     string result = "";
 
     // true-只获取应用级别配置
-    if (TarsRemoteConfig::getInstance()->addConfig(filename, result, true))
+    if (RemoteConfig::getInstance()->addConfig(filename, result, true))
 
     {
-        TarsRemoteNotify::getInstance()->report(result);
+        RemoteNotify::getInstance()->report(result);
 
         return true;
     }
 
-    TarsRemoteNotify::getInstance()->report(result);
+    RemoteNotify::getInstance()->report(result);
 
     return true;
 }
 
-void Application::setHandle(TC_EpollServer::BindAdapterPtr& adapter)
+void Application::main(int argc, char *argv[])
 {
-    adapter->setHandle<ServantHandle>();
+    TC_Option op;
+    op.decode(argc, argv);
+    main(op);
 }
 
-void Application::main(int argc, char *argv[])
+void Application::main(const TC_Option &option)
+{
+	//直接输出编译的TARS版本
+	if(option.hasParam("version"))
+	{
+		cout << "TARS:" << TARS_VERSION << endl;
+		exit(0);
+	}
+
+	//加载配置文件
+	ServerConfig::ConfigFile = option.getValue("config");
+
+	if(ServerConfig::ConfigFile == "")
+	{
+		cerr << "start server with config, for example: exe --config=config.conf" << endl;
+
+		exit(-1);
+	}
+
+	string config = TC_File::load2str(ServerConfig::ConfigFile);
+
+	main(config);
+}
+
+void Application::main(const string &config)
 {
     try
     {
-#if TARS_SSL
-        SSLManager::GlobalInit();
-#endif
+#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
         TC_Common::ignorePipe();
+#endif
 
         //解析配置文件
-        parseConfig(argc, argv);
+        parseConfig(config);
 
         //初始化Proxy部分
         initializeClient();
@@ -599,44 +737,58 @@ void Application::main(int argc, char *argv[])
         //初始化Server部分
         initializeServer();
 
-        vector<TC_EpollServer::BindAdapterPtr> adapters;
+        vector <TC_EpollServer::BindAdapterPtr> adapters;
 
         //绑定对象和端口
         bindAdapter(adapters);
 
-        //业务应用的初始化
-        initialize();
-
         //输出所有adapter
         outAllAdapter(cout);
 
-        //设置HandleGroup分组，启动线程
-        for (size_t i = 0; i < adapters.size(); ++i)
-        {
-            string name = adapters[i]->getName();
-
-            string groupName = adapters[i]->getHandleGroupName();
-
-            if(name != groupName)
-            {
-                TC_EpollServer::BindAdapterPtr ptr = _epollServer->getBindAdapter(groupName);
-
-                if (!ptr)
-                {
-                    throw runtime_error("[TARS][adater `" + name + "` setHandle to group `" + groupName + "` fail!");
-                }
-
-            }
-            setHandle(adapters[i]);
-        }
-
-        //启动业务处理线程
-        _epollServer->startHandle();
-        _epollServer->createEpoll();
-
-        cout << "\n" << outfill("[initialize server] ", '.')  << " [Done]" << endl;
+        cout << "\n" << TC_Common::outfill("[initialize server] ", '.')  << " [Done]" << endl;
 
         cout << OUT_LINE_LONG << endl;
+
+        {
+            bool initing = true;
+            std::mutex mtx;
+            std::condition_variable cond;
+
+            std::thread keepActiving([&]
+            {
+                do {
+                    //发送心跳给node, 表示正在启动
+                    TARS_KEEPACTIVING;
+
+                    //等待initialize初始化完毕
+                    std::unique_lock<std::mutex> lock(mtx);
+                    cond.wait_for(lock, std::chrono::seconds(2));
+
+                }while(initing);
+            });
+            //捕捉初始化可能的异常
+            try
+            {
+                TC_Common::msleep(100);
+                //业务应用的初始化
+                initialize();
+                initing = false;
+                {
+                    std::unique_lock<std::mutex> lock(mtx);
+                    cond.notify_all();
+                }
+                keepActiving.join();
+            }
+            catch (exception & ex)
+            {
+                keepActiving.detach();
+                RemoteNotify::getInstance()->report("exit: " + string(ex.what()));
+	            std::this_thread::sleep_for(std::chrono::milliseconds(100)); //稍微休息一下, 让当前处理包能够回复
+
+	            cout << "[init exception]:" << ex.what() << endl;
+                exit(-1);
+            }
+        }
 
         //动态加载配置文件
         TARS_ADD_ADMIN_CMD_PREFIX(TARS_CMD_LOAD_CONFIG, Application::cmdLoadConfig);
@@ -656,6 +808,9 @@ void Application::main(int argc, char *argv[])
         //查看编译的TARS版本
         TARS_ADD_ADMIN_CMD_PREFIX(TARS_CMD_VIEW_VERSION, Application::cmdViewVersion);
 
+        //查看服务buildid(编译时间）
+        TARS_ADD_ADMIN_CMD_PREFIX(TARS_CMD_VIEW_BID, Application::cmdViewBuildID);
+
         //加载配置文件中的属性信息
         TARS_ADD_ADMIN_CMD_PREFIX(TARS_CMD_LOAD_PROPERTY, Application::cmdLoadProperty);
 
@@ -668,8 +823,14 @@ void Application::main(int argc, char *argv[])
         //设置服务的core limit
         TARS_ADD_ADMIN_CMD_PREFIX(TARS_CMD_CLOSE_CORE, Application::cmdCloseCoreDump);
 
-        //重新加载locator信息
-        TARS_ADD_ADMIN_CMD_PREFIX(TARS_CMD_RELOAD_LOCATOR, Application::cmdReloadLocator);
+        //设置是否标准输出
+        TARS_ADD_ADMIN_CMD_PREFIX(TARS_CMD_CLOSE_COUT, Application::cmdCloseCout);
+
+	    //设置是否标准输出
+	    TARS_ADD_ADMIN_CMD_PREFIX(TARS_CMD_RELOAD_LOCATOR, Application::cmdReloadLocator);
+
+	    //设置是否标准输出
+	    TARS_ADD_ADMIN_CMD_PREFIX(TARS_CMD_RESOURCE, Application::cmdViewResource);
 
         //上报版本
         TARS_REPORTVERSION(TARS_VERSION);
@@ -678,12 +839,34 @@ void Application::main(int argc, char *argv[])
         TARS_KEEPALIVE("");
 
         //发送给notify表示服务启动了
-        TarsRemoteNotify::getInstance()->report("restart");
+        RemoteNotify::getInstance()->report("restart");
 
         //ctrl + c能够完美结束服务
-        signal(SIGINT, sighandler);
+//#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
+//		std::thread th1(signal, SIGINT, sighandler);
+//		th1.detach();
+//		//k8s pod完美退出
+//		std::thread th2(signal, SIGTERM, sighandler);
+//		th2.detach();
+//#else
+//		std::thread th([] {SetConsoleCtrlHandler(HandlerRoutine, TRUE); });
+//		th.detach();
+//#endif
+//#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
+	    TC_Port::registerCtrlC([=]{
+		    this->terminate();
+#if TARGET_PLATFORM_WINDOWS
+		    ExitProcess(0);
+#endif
+	    });
+	    TC_Port::registerTerm([=]{
+		    this->terminate();
+#if TARGET_PLATFORM_WINDOWS
+		    ExitProcess(0);
+#endif
+	    });
 
-
+#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
         if(_conf.get("/tars/application/server<closecout>",AppCache::getInstance()->get("closeCout")) != "0")
         {
             // 重定向stdin、stdout、stderr
@@ -701,44 +884,28 @@ void Application::main(int argc, char *argv[])
                close(2);
             }
         }
+#endif
     }
     catch (exception &ex)
     {
-        TarsRemoteNotify::getInstance()->report("exit: " + string(ex.what()));
-
         cout << "[main exception]:" << ex.what() << endl;
 
-        terminate();
+        RemoteNotify::getInstance()->report("exit: " + string(ex.what()));
+
+	    std::this_thread::sleep_for(std::chrono::milliseconds(100)); //稍微休息一下, 让当前处理包能够回复
+
+	    exit(-1);
     }
 
     //初始化完毕后, 日志再修改为异步
-    TarsRollLogger::getInstance()->sync(false);
+    LocalRollLogger::getInstance()->sync(false);
 }
 
-void Application::parseConfig(int argc, char *argv[])
+void Application::parseConfig(const string &config)
 {
-    TC_Option op;
+    _conf.parseString(config);
 
-    op.decode(argc, argv);
-
-    //直接输出编译的TARS版本
-    if(op.hasParam("version"))
-    {
-        cout << "TARS:" << TARS_VERSION << endl;
-        exit(0);
-    }
-
-    //加载配置文件
-    ServerConfig::ConfigFile = op.getValue("config");
-
-    if(ServerConfig::ConfigFile == "")
-    {
-        cerr << "start server with config, for example: " << argv[0] << " --config=config.conf" << endl;
-
-        exit(0);
-    }
-
-    _conf.parseFile(ServerConfig::ConfigFile);
+    onParseConfig(_conf);
 }
 
 TC_EpollServer::BindAdapter::EOrder Application::parseOrder(const string &s)
@@ -772,49 +939,30 @@ void Application::initializeClient()
     //初始化通信器
     _communicator = CommunicatorFactory::getInstance()->getCommunicator(_conf);
 
-    cout << outfill("[proxy config]:") << endl;
+    cout << TC_Common::outfill("[proxy config]:") << endl;
 
     //输出
     outClient(cout);
-#if TARS_SSL
-    try {
-        string path = _conf.get("/tars/application/clientssl/<path>", "./");
-        if (path.empty() || path[path.length() - 1] != '/')
-            path += "/";
-
-        string ca = path + _conf.get("/tars/application/clientssl/<ca>");
-        string cert = path + _conf.get("/tars/application/clientssl/<cert>");
-        if (cert == path) cert.clear();
-        string key = path + _conf.get("/tars/application/clientssl/<key>");
-        if (key == path) key.clear();
-
-        if (!SSLManager::getInstance()->AddCtx("client", ca, cert, key, false))
-            cout << "failed add client cert " << ca << endl;
-        else
-            cout << "succ add client cert " << ca << endl;
-    }
-    catch(...) {
-    }
-#endif
 }
 
 void Application::outClient(ostream &os)
 {
-    os << outfill("locator")                     << _communicator->getProperty("locator") << endl;
-    os << outfill("sync-invoke-timeout")         << _communicator->getProperty("sync-invoke-timeout") << endl;
-    os << outfill("async-invoke-timeout")        << _communicator->getProperty("async-invoke-timeout") << endl;
-    os << outfill("refresh-endpoint-interval")   << _communicator->getProperty("refresh-endpoint-interval") << endl;
-    os << outfill("stat")                        << _communicator->getProperty("stat") << endl;
-    os << outfill("property")                    << _communicator->getProperty("property") << endl;
-    os << outfill("report-interval")             << _communicator->getProperty("report-interval") << endl;
-    os << outfill("sample-rate")                 << _communicator->getProperty("sample-rate") << endl;
-    os << outfill("max-sample-count")            << _communicator->getProperty("max-sample-count") << endl;
-    os << outfill("netthread")                  << _communicator->getProperty("netthread") << endl;
-    os << outfill("recvthread")                  << _communicator->getProperty("recvthread") << endl;
-    os << outfill("asyncthread")                 << _communicator->getProperty("asyncthread") << endl;
-    os << outfill("modulename")                  << _communicator->getProperty("modulename") << endl;
-    os << outfill("enableset")                     << _communicator->getProperty("enableset") << endl;
-    os << outfill("setdivision")                 << _communicator->getProperty("setdivision") << endl;
+	cout << OUT_LINE << "\n" << TC_Common::outfill("[load client]:") << endl;
+
+    os << TC_Common::outfill("locator")                     << _communicator->getProperty("locator") << endl;
+    os << TC_Common::outfill("sync-invoke-timeout")         << _communicator->getProperty("sync-invoke-timeout") << endl;
+    os << TC_Common::outfill("async-invoke-timeout")        << _communicator->getProperty("async-invoke-timeout") << endl;
+    os << TC_Common::outfill("refresh-endpoint-interval")   << _communicator->getProperty("refresh-endpoint-interval") << endl;
+    os << TC_Common::outfill("stat")                        << _communicator->getProperty("stat") << endl;
+    os << TC_Common::outfill("property")                    << _communicator->getProperty("property") << endl;
+    os << TC_Common::outfill("report-interval")             << _communicator->getProperty("report-interval") << endl;
+//    os << TC_Common::outfill("sample-rate")                 << _communicator->getProperty("sample-rate") << endl;
+//    os << TC_Common::outfill("max-sample-count")            << _communicator->getProperty("max-sample-count") << endl;
+    os << TC_Common::outfill("netthread")                  << _communicator->getProperty("netthread") << endl;
+    os << TC_Common::outfill("asyncthread")                 << _communicator->getProperty("asyncthread") << endl;
+    os << TC_Common::outfill("modulename")                  << _communicator->getProperty("modulename") << endl;
+    os << TC_Common::outfill("enableset")                     << _communicator->getProperty("enableset") << endl;
+    os << TC_Common::outfill("setdivision")                 << _communicator->getProperty("setdivision") << endl;
 }
 
 string Application::toDefault(const string &s, const string &sDefault)
@@ -825,6 +973,7 @@ string Application::toDefault(const string &s, const string &sDefault)
     }
     return s;
 }
+
 string Application::setDivision()
 {
     bool bEnableSet = TC_Common::lower(_conf.get("/tars/application<enableset>", "n"))=="y"?true:false;;
@@ -833,45 +982,83 @@ string Application::setDivision()
     return sSetDevision;
 }
 
-void Application::addServantProtocol(const string& servant, const TC_EpollServer::protocol_functor& protocol)
+void Application::addServantProtocol(const string& servant, const TC_NetWorkBuffer::protocol_functor& protocol)
 {
-    string adapterName = ServantHelperManager::getInstance()->getServantAdapter(servant);
+    string adapterName = _servantHelper->getServantAdapter(servant);
 
     if (adapterName == "")
     {
-        throw runtime_error("[TARS]addServantProtocol fail, no found adapter for servant:" + servant);
+        throw runtime_error("addServantProtocol fail, no found adapter for servant:" + servant);
     }
     getEpollServer()->getBindAdapter(adapterName)->setProtocol(protocol);
 }
 
-void Application::addServantConnProtocol(const string& servant, const TC_EpollServer::conn_protocol_functor& protocol)
+void Application::addAcceptCallback(const TC_EpollServer::accept_callback_functor& cb)
 {
-    string adapterName = ServantHelperManager::getInstance()->getServantAdapter(servant);
+    _acceptFuncs.push_back(cb);
+}
 
-    if (adapterName.empty())
+void Application::onAccept(TC_EpollServer::Connection* cPtr)
+{
+    for (size_t i = 0; i < _acceptFuncs.size(); ++i)
     {
-        throw runtime_error("[TAF]addServantConnProtocol fail, no found adapter for servant:" + servant);
+        _acceptFuncs[i](cPtr);
     }
-
-    getEpollServer()->getBindAdapter(adapterName)->setConnProtocol(protocol);
 }
 
 void Application::addServantOnClose(const string& servant, const TC_EpollServer::close_functor& cf)
 {
-    string adapterName = ServantHelperManager::getInstance()->getServantAdapter(servant);
+    string adapterName = _servantHelper->getServantAdapter(servant);
 
     if (adapterName.empty())
     {
-        throw runtime_error("[TAF]setServantOnClose fail, no found adapter for servant:" + servant);
+        throw runtime_error("setServantOnClose fail, no found adapter for servant:" + servant);
     }
 
     getEpollServer()->getBindAdapter(adapterName)->setOnClose(cf);
 }
 
+void Application::outServer(ostream &os)
+{
+	os << TC_Common::outfill("Application(app)")            << ServerConfig::Application << endl;
+	os << TC_Common::outfill("ServerName(server)")          << ServerConfig::ServerName << endl;
+	os << TC_Common::outfill("BasePath(basepath)")          << ServerConfig::BasePath << endl;
+	os << TC_Common::outfill("DataPath(datapath)")          << ServerConfig::DataPath << endl;
+	os << TC_Common::outfill("LocalIp(localip)")            << ServerConfig::LocalIp << endl;
+	os << TC_Common::outfill("Local(local)")                << ServerConfig::Local << endl;
+	os << TC_Common::outfill("LogPath(logpath)")            << ServerConfig::LogPath << endl;
+	os << TC_Common::outfill("LogSize(logsize)")            << ServerConfig::LogSize << endl;
+	os << TC_Common::outfill("LogNum(lognum)")              << ServerConfig::LogNum << endl;
+	os << TC_Common::outfill("LogLevel(loglevel)")          << ServerConfig::LogLevel << endl;
+	os << TC_Common::outfill("Log(log)")                    << ServerConfig::Log << endl;
+	os << TC_Common::outfill("Node(node)")                  << ServerConfig::Node << endl;
+	os << TC_Common::outfill("Config(config)")              << ServerConfig::Config << endl;
+	os << TC_Common::outfill("Notify(notify)")              << ServerConfig::Notify << endl;
+	os << TC_Common::outfill("OpenCoroutine(opencoroutine)")      << ServerConfig::OpenCoroutine << endl;
+	os << TC_Common::outfill("CoroutineMemSize(coroutinememsize)")   << ServerConfig::CoroutineMemSize << endl;
+	os << TC_Common::outfill("CoroutineStackSize(coroutinestack)") << ServerConfig::CoroutineStackSize << endl;
+	os << TC_Common::outfill("CloseCout(closecout)")          << ServerConfig::CloseCout << endl;
+	os << TC_Common::outfill("NetThread(netthread)")          << ServerConfig::NetThread << endl;
+	os << TC_Common::outfill("ManualListen(manuallisten)")       << ServerConfig::ManualListen << endl;
+	os << TC_Common::outfill("MergeNetImp(mergenetimp)")       << ServerConfig::MergeNetImp << endl;
+	os << TC_Common::outfill("ReportFlow(reportflow)")                  << ServerConfig::ReportFlow<< endl;
+	os << TC_Common::outfill("BackPacketLimit(backpacketlimit)")  << ServerConfig::BackPacketLimit<< endl;
+	os << TC_Common::outfill("BackPacketMin(backpacketmin)")  << ServerConfig::BackPacketMin<< endl;
+
+#if TARS_SSL
+	cout << TC_Common::outfill("Ca(ca)")                    << ServerConfig::CA << endl;
+	cout << TC_Common::outfill("Cert(cert)")              << ServerConfig::Cert << endl;
+	cout << TC_Common::outfill("Key(key)")                  << ServerConfig::Key << endl;
+	cout << TC_Common::outfill("VerifyClient(verifyclient)")      << ServerConfig::VerifyClient << endl;
+	cout << TC_Common::outfill("Ciphers(ciphers)")               << ServerConfig::Ciphers << endl;
+#endif
+
+}
+
 
 void Application::initializeServer()
 {
-    cout << OUT_LINE << "\n" << outfill("[server config]:") << endl;
+    cout << OUT_LINE << "\n" << TC_Common::outfill("[server config]:") << endl;
 
     ServerConfig::Application  = toDefault(_conf.get("/tars/application/server<app>"), "UNKNOWN");
 
@@ -889,9 +1076,34 @@ void Application::initializeServer()
     }
 
     ServerConfig::ServerName        = toDefault(_conf.get("/tars/application/server<server>"), exe);
-    ServerConfig::BasePath          = toDefault(_conf.get("/tars/application/server<basepath>"), ".") + "/";
-    ServerConfig::DataPath          = toDefault(_conf.get("/tars/application/server<datapath>"), ".") + "/";
-    ServerConfig::LogPath           = toDefault(_conf.get("/tars/application/server<logpath>"),  ".") + "/";
+
+
+#if TARGET_PLATFORM_WINDOWS    
+    ServerConfig::BasePath          = TC_File::simplifyDirectory(_conf.get("/tars/application/server<basepath.win>")) + FILE_SEP;
+    if (ServerConfig::BasePath == FILE_SEP)
+    {
+        ServerConfig::BasePath          = TC_File::simplifyDirectory(toDefault(_conf.get("/tars/application/server<basepath>"), ".")) + FILE_SEP;
+    }
+
+    ServerConfig::DataPath          = TC_File::simplifyDirectory(_conf.get("/tars/application/server<datapath.win>")) + FILE_SEP;
+    if(ServerConfig::DataPath == FILE_SEP)
+    {
+        ServerConfig::DataPath          = TC_File::simplifyDirectory(toDefault(_conf.get("/tars/application/server<datapath>"), ".")) + FILE_SEP;
+    }
+
+    ServerConfig::LogPath           = TC_File::simplifyDirectory(_conf.get("/tars/application/server<logpath.win>")) + FILE_SEP;
+    if(ServerConfig::LogPath == FILE_SEP)
+    {
+        ServerConfig::LogPath       = TC_File::simplifyDirectory(toDefault(_conf.get("/tars/application/server<logpath>"),  ".")) + FILE_SEP;
+    }
+#else
+    ServerConfig::BasePath          = TC_File::simplifyDirectory(toDefault(_conf.get("/tars/application/server<basepath>"), ".")) + FILE_SEP;
+    ServerConfig::DataPath          = TC_File::simplifyDirectory(toDefault(_conf.get("/tars/application/server<datapath>"), ".")) + FILE_SEP;
+    ServerConfig::LogPath           = TC_File::simplifyDirectory(toDefault(_conf.get("/tars/application/server<logpath>"),  ".")) + FILE_SEP;
+
+#endif
+    ServerConfig::TarsPath           = TC_File::simplifyDirectory(ServerConfig::LogPath + FILE_SEP + ".." + FILE_SEP) + FILE_SEP;
+
     ServerConfig::LogSize           = TC_Common::toSize(toDefault(_conf.get("/tars/application/server<logsize>"), "52428800"), 52428800);
     ServerConfig::LogNum            = TC_Common::strto<int>(toDefault(_conf.get("/tars/application/server<lognum>"), "10"));
     ServerConfig::LocalIp           = _conf.get("/tars/application/server<localip>");
@@ -902,12 +1114,38 @@ void Application::initializeServer()
     ServerConfig::Notify            = _conf.get("/tars/application/server<notify>");
     ServerConfig::ReportFlow        = _conf.get("/tars/application/server<reportflow>")=="0"?0:1;
     ServerConfig::IsCheckSet        = _conf.get("/tars/application/server<checkset>","1")=="0"?0:1;
-    ServerConfig::OpenCoroutine        = TC_Common::strto<bool>(toDefault(_conf.get("/tars/application/server<opencoroutine>"), "0"));
-    ServerConfig::CoroutineMemSize    =  TC_Common::toSize(toDefault(_conf.get("/tars/application/server<coroutinememsize>"), "1073741824"), 1073741824);
-    ServerConfig::CoroutineStackSize    = TC_Common::toSize(toDefault(_conf.get("/tars/application/server<coroutinestack>"), "131072"), 131072);
+    ServerConfig::OpenCoroutine     = TC_Common::strto<bool>(toDefault(_conf.get("/tars/application/server<opencoroutine>"), "0"));
+    ServerConfig::CoroutineMemSize  =  TC_Common::toSize(toDefault(_conf.get("/tars/application/server<coroutinememsize>"), "1G"), 1024*1024*1024);
+    ServerConfig::CoroutineStackSize= (uint32_t)TC_Common::toSize(toDefault(_conf.get("/tars/application/server<coroutinestack>"), "128K"), 1024*128);
+    ServerConfig::ManualListen      = _conf.get("/tars/application/server<manuallisten>", "0") == "0" ? false : true;
+	ServerConfig::MergeNetImp       = _conf.get("/tars/application/server<mergenetimp>", "0") == "0" ? false : true;
+	ServerConfig::NetThread         = TC_Common::strto<int>(toDefault(_conf.get("/tars/application/server<netthread>"), "1"));
+	ServerConfig::CloseCout        = _conf.get("/tars/application/server<closecout>","1")=="0"?0:1;
+	ServerConfig::BackPacketLimit  = TC_Common::strto<int>(_conf.get("/tars/application/server<backpacketlimit>", "100*1024*1024"));
+	ServerConfig::BackPacketMin    = TC_Common::strto<int>(_conf.get("/tars/application/server<backpacketmin>", "1024"));
 
-    if(ServerConfig::LocalIp.empty())
+	ServerConfig::Context["node_name"] = ServerConfig::LocalIp;
+#if TARS_SSL
+	ServerConfig::CA                = _conf.get("/tars/application/server<ca>");
+	ServerConfig::Cert              = _conf.get("/tars/application/server<cert>");
+	ServerConfig::Key               = _conf.get("/tars/application/server<key>");
+	ServerConfig::VerifyClient      = _conf.get("/tars/application/server<verifyclient>","0")=="0"?false:true;
+	ServerConfig::Ciphers           = _conf.get("/tars/application/server<ciphers>");
+
+	if(!ServerConfig::Cert.empty()) {
+		_ctx = TC_OpenSSL::newCtx(ServerConfig::CA, ServerConfig::Cert, ServerConfig::Key, ServerConfig::VerifyClient, ServerConfig::Ciphers);
+
+		if (!_ctx) {
+			TLOGERROR("[TARS]load server ssl error, ca:" << ServerConfig::CA << endl);
+			exit(-1);
+		}
+	}
+#endif
+
+
+    if (ServerConfig::LocalIp.empty())
     {
+        // ServerConfig::LocalIp = "127.0.0.1";
         vector<string> v = TC_Socket::getLocalHosts();
 
         ServerConfig::LocalIp = "127.0.0.1";
@@ -922,55 +1160,50 @@ void Application::initializeServer()
         }
     }
 
+    onServerConfig();
+
     //输出信息
     outServer(cout);
 
-    string sNetThread = _conf.get("/tars/application/server<netthread>", "1");
-    unsigned int iNetThreadNum = TC_Common::strto<unsigned int>(sNetThread);
-
-    if(iNetThreadNum < 1)
-    {    
-        iNetThreadNum = 1;
+    if (ServerConfig::NetThread < 1)
+    {
+        ServerConfig::NetThread = 1;
         cout << OUT_LINE << "\nwarning:netThreadNum < 1." << endl;
     }
 
     //网络线程的配置数目不能15个
-    if(iNetThreadNum > 15)
-    {    
-        iNetThreadNum = 15;
+    if (ServerConfig::NetThread > 15)
+    {
+        ServerConfig::NetThread = 15;
         cout << OUT_LINE << "\nwarning:netThreadNum > 15." << endl;
     }
 
-    _epollServer = new TC_EpollServer(iNetThreadNum);
+    _epollServer = new TC_EpollServer(ServerConfig::NetThread);
 
-	//网络线程的内存池配置
-    {
-        size_t minBlockSize = TC_Common::strto<size_t>(toDefault(_conf.get("/tars/application/server<poolminblocksize>"), "1024")); // 1KB
-        size_t maxBlockSize = TC_Common::strto<size_t>(toDefault(_conf.get("/tars/application/server<poolmaxblocksize>"), "8388608")); // 8MB
-        size_t maxBytes = TC_Common::strto<size_t>(toDefault(_conf.get("/tars/application/server<poolmaxbytes>"), "67108864")); // 64MB
-        _epollServer->setNetThreadBufferPoolInfo(minBlockSize, maxBlockSize, maxBytes);
-    }
-
+    _epollServer->setOnAccept(std::bind(&Application::onAccept, this, std::placeholders::_1));
 
     //初始化服务是否对空链接进行超时检查
     bool bEnable = (_conf.get("/tars/application/server<emptyconcheck>","0")=="1")?true:false;
 
-    _epollServer->EnAntiEmptyConnAttack(bEnable);
+    _epollServer->enAntiEmptyConnAttack(bEnable);
     _epollServer->setEmptyConnTimeout(TC_Common::strto<int>(toDefault(_conf.get("/tars/application/server<emptyconntimeout>"), "3")));
+
+    //合并线程
+	_epollServer->setMergeHandleNetThread(ServerConfig::MergeNetImp);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////
     //初始化本地文件cache
-    cout << OUT_LINE << "\n" << outfill("[set file cache ]") << "OK" << endl;
+    cout << OUT_LINE << "\n" << TC_Common::outfill("[set file cache ]") << "OK" << endl;
     AppCache::getInstance()->setCacheInfo(ServerConfig::DataPath+ServerConfig::ServerName+".tarsdat",0);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////
     //初始化本地Log
-    cout << OUT_LINE << "\n" << outfill("[set roll logger] ") << "OK" << endl;
-    TarsRollLogger::getInstance()->setLogInfo(ServerConfig::Application, ServerConfig::ServerName, ServerConfig::LogPath, ServerConfig::LogSize, ServerConfig::LogNum, _communicator, ServerConfig::Log);
-    _epollServer->setLocalLogger(TarsRollLogger::getInstance()->logger());
+    cout << OUT_LINE << "\n" << TC_Common::outfill("[set roll logger] ") << "OK" << endl;
+    LocalRollLogger::getInstance()->setLogInfo(ServerConfig::Application, ServerConfig::ServerName, ServerConfig::LogPath, ServerConfig::LogSize, ServerConfig::LogNum, _communicator, ServerConfig::Log);
+    _epollServer->setLocalLogger(LocalRollLogger::getInstance()->logger());
 
     //初始化是日志为同步
-    TarsRollLogger::getInstance()->sync(true);
+    LocalRollLogger::getInstance()->sync(true);
 
     //设置日志级别
     string level = AppCache::getInstance()->get("logLevel");
@@ -979,44 +1212,44 @@ void Application::initializeServer()
         level = _conf.get("/tars/application/server<logLevel>","DEBUG");
     }
 
-    TarsRollLogger::getInstance()->logger()->setLogLevel(TC_Common::upper(level));
+	ServerConfig::LogLevel = TC_Common::upper(level);
 
-    ServerConfig::LogLevel = TC_Common::upper(level);
+	LocalRollLogger::getInstance()->logger()->setLogLevel(ServerConfig::LogLevel);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////
     //初始化到LogServer代理
-    cout << OUT_LINE << "\n" << outfill("[set time logger] ") << "OK" << endl;
+    cout << OUT_LINE << "\n" << TC_Common::outfill("[set time logger] ") << "OK" << endl;
     bool bLogStatReport = (_conf.get("/tars/application/server<logstatreport>", "0") == "1") ? true : false;
-    TarsTimeLogger::getInstance()->setLogInfo(_communicator, ServerConfig::Log, ServerConfig::Application, ServerConfig::ServerName, ServerConfig::LogPath, setDivision(), bLogStatReport);
+    RemoteTimeLogger::getInstance()->setLogInfo(_communicator, ServerConfig::Log, ServerConfig::Application, ServerConfig::ServerName, ServerConfig::LogPath, setDivision(), bLogStatReport);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////
     //初始化到配置中心代理
-    cout << OUT_LINE << "\n" << outfill("[set remote config] ") << "OK" << endl;
-    TarsRemoteConfig::getInstance()->setConfigInfo(_communicator, ServerConfig::Config, ServerConfig::Application, ServerConfig::ServerName, ServerConfig::BasePath,setDivision());
+    cout << OUT_LINE << "\n" << TC_Common::outfill("[set remote config] ") << "OK" << endl;
+    RemoteConfig::getInstance()->setConfigInfo(_communicator, ServerConfig::Config, ServerConfig::Application, ServerConfig::ServerName, ServerConfig::BasePath,setDivision());
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////
     //初始化到信息中心代理
-    cout << OUT_LINE << "\n" << outfill("[set remote notify] ") << "OK" << endl;
-    TarsRemoteNotify::getInstance()->setNotifyInfo(_communicator, ServerConfig::Notify, ServerConfig::Application, ServerConfig::ServerName, setDivision());
+    cout << OUT_LINE << "\n" << TC_Common::outfill("[set remote notify] ") << "OK" << endl;
+    RemoteNotify::getInstance()->setNotifyInfo(_communicator, ServerConfig::Notify, ServerConfig::Application, ServerConfig::ServerName, setDivision(), ServerConfig::LocalIp);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////
     //初始化到Node的代理
-    cout << OUT_LINE << "\n" << outfill("[set node proxy]") << "OK" << endl;
-    TarsNodeFHelper::getInstance()->setNodeInfo(_communicator, ServerConfig::Node, ServerConfig::Application, ServerConfig::ServerName);
+    cout << OUT_LINE << "\n" << TC_Common::outfill("[set node proxy]") << "OK" << endl;
+    KeepAliveNodeFHelper::getInstance()->setNodeInfo(_communicator, ServerConfig::Node, ServerConfig::Application, ServerConfig::ServerName);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////
     //初始化管理对象
-    cout << OUT_LINE << "\n" << outfill("[set admin adapter]") << "OK" << endl;
+    cout << OUT_LINE << "\n" << TC_Common::outfill("[set admin adapter]") << "OK" << endl;
 
     if(!ServerConfig::Local.empty())
     {
-        ServantHelperManager::getInstance()->addServant<AdminServant>("AdminObj");
+        _servantHelper->addServant<AdminServant>("AdminObj", this);
 
-        ServantHelperManager::getInstance()->setAdapterServant("AdminAdapter", "AdminObj");
+        _servantHelper->setAdapterServant("AdminAdapter", "AdminObj");
 
         TC_EpollServer::BindAdapterPtr lsPtr = new TC_EpollServer::BindAdapter(_epollServer.get());
 
-        lsPtr->setName("AdminAdapter");
+	    setAdapter(lsPtr, "AdminAdapter");
 
         lsPtr->setEndpoint(ServerConfig::Local);
 
@@ -1030,11 +1263,7 @@ void Application::initializeServer()
 
         lsPtr->setProtocol(AppProtocol::parse);
 
-        lsPtr->setHandleGroupName("AdminAdapter");
-
-        lsPtr->setHandleNum(1);
-
-        lsPtr->setHandle<ServantHandle>();
+        lsPtr->setHandle<ServantHandle>(1, this);
 
         _epollServer->bind(lsPtr);
     }
@@ -1048,68 +1277,58 @@ void Application::initializeServer()
         sRspQueue += ServerConfig::ServerName;
         sRspQueue += ".sendrspqueue";
 
-        PropertyReportPtr p;
-        p = _communicator->getStatReport()->createPropertyReport(sRspQueue, PropertyReport::avg());
-
-        _epollServer->_pReportRspQueue = p.get();
+        g_pReportRspQueue = _communicator->getStatReport()->createPropertyReport(sRspQueue, PropertyReport::avg());
     }
 
-#if TARS_SSL
-    try {
-        string path = _conf.get("/tars/application/serverssl/<path>", "./");
-        if (path.empty() || path[path.length() - 1] != '/')
-            path += "/";
-
-        string ca = path + _conf.get("/tars/application/serverssl/<ca>");
-        if (ca == path) ca.clear();
-        string cert = path + _conf.get("/tars/application/serverssl/<cert>");
-        string key = path + _conf.get("/tars/application/serverssl/<key>");
-        bool verifyClient = (_conf.get("/tars/application/serverssl/<verifyclient>", "0") == "0") ? false : true;
-
-        if (!SSLManager::getInstance()->AddCtx("server", ca, cert, key, verifyClient))
-            cout << "failed add server cert " << ca << endl;
-        else
-            cout << "succ add server cert " << ca << ", verifyClient " << verifyClient << endl;
-    } catch(...) {
-    }
-#endif
 }
 
-void Application::outServer(ostream &os)
+void Application::setAdapter(TC_EpollServer::BindAdapterPtr& adapter, const string &name)
 {
-    os << outfill("Application")        << ServerConfig::Application << endl;
-    os << outfill("ServerName")         << ServerConfig::ServerName << endl;
-    os << outfill("BasePath")           << ServerConfig::BasePath << endl;
-    os << outfill("DataPath")           << ServerConfig::DataPath << endl;
-    os << outfill("LocalIp")            << ServerConfig::LocalIp << endl;
-    os << outfill("Local")              << ServerConfig::Local << endl;
-    os << outfill("LogPath")            << ServerConfig::LogPath << endl;
-    os << outfill("LogSize")            << ServerConfig::LogSize << endl;
-    os << outfill("LogNum")             << ServerConfig::LogNum << endl;
-    os << outfill("Log")                << ServerConfig::Log << endl;
-    os << outfill("Node")               << ServerConfig::Node << endl;
-    os << outfill("Config")             << ServerConfig::Config << endl;
-    os << outfill("Notify")             << ServerConfig::Notify << endl;
-    os << outfill("OpenCoroutine")      << ServerConfig::OpenCoroutine << endl;
-    os << outfill("CoroutineMemSize")   << ServerConfig::CoroutineMemSize << endl;
-    os << outfill("CoroutineStackSize") << ServerConfig::CoroutineStackSize << endl;
-    os << outfill("CloseCout")          << TC_Common::tostr(_conf.get("/tars/application/server<closecout>",AppCache::getInstance()->get("closeCout")) == "0"?0:1)<< endl;
-    os << outfill("netthread")          << TC_Common::tostr(_conf.get("/tars/application/server<netthread>","1")) << endl;
-    os << outfill("BackPacketBuffLimit") << TC_Common::strto<size_t>(toDefault(_conf.get("/tars/application/server<BackPacketBuffLimit>", "0"), "0")) << endl;
+	adapter->setName(name);
 
-    string level = AppCache::getInstance()->get("logLevel");
-    if(level.empty())
-    {
-        level = _conf.get("/tars/application/server<logLevel>","DEBUG");
-    }
-    os << outfill("logLevel")           << level<< endl;
+	// 设置该obj的鉴权账号密码，只要一组就够了
+	{
+		std::string accKey      = _conf.get("/tars/application/server/" + name + "<accesskey>");
+		std::string secretKey   = _conf.get("/tars/application/server/" + name + "<secretkey>");
 
-    os << outfill("ReportFlow")         << ServerConfig::ReportFlow<< endl;
+		if (!accKey.empty())
+			adapter->setAkSk(accKey, secretKey);
+
+//		adapter->setAuthProcessWrapper(&tars::processAuth);
+		adapter->setAuthProcessWrapper(std::bind(tars::processAuth, std::placeholders::_1, std::placeholders::_2, _servantHelper->getAdapterServant(name)));
+	}
+
+#if TARS_SSL
+	string cert = _conf.get("/tars/application/server/" + name + "<cert>");
+
+	if (!cert.empty())
+	{
+		string ca = _conf.get("/tars/application/server/" + name + "<ca>");
+		string key = _conf.get("/tars/application/server/" + name + "<key>");
+		bool verifyClient =
+			_conf.get("/tars/application/server/" + name + "<verifyclient>", "0") == "0" ? false : true;
+		string ciphers = _conf.get("/tars/application/server/" + name + "<ciphers>");
+
+		shared_ptr<TC_OpenSSL::CTX> ctx = TC_OpenSSL::newCtx(ca, cert, key, verifyClient, ciphers);
+
+		if (!ctx) {
+			TLOGERROR("load server ssl error, cert:" << cert << endl);
+			exit(-1);
+		}
+
+		adapter->setSSLCtx(ctx);
+	}
+	else
+	{
+		adapter->setSSLCtx(_ctx);
+	}
+#endif
+
 }
 
 void Application::bindAdapter(vector<TC_EpollServer::BindAdapterPtr>& adapters)
 {
-    size_t iBackPacketBuffLimit = TC_Common::strto<size_t>(toDefault(_conf.get("/tars/application/server<BackPacketBuffLimit>", "0"), "0"));
+    // size_t iBackPacketBuffLimit = TC_Common::strto<size_t>(toDefault(_conf.get("/tars/application/server<BackPacketBuffLimit>", "0"), "0"));
 
     string sPrefix = ServerConfig::Application + "." + ServerConfig::ServerName + ".";
 
@@ -1125,12 +1344,20 @@ void Application::bindAdapter(vector<TC_EpollServer::BindAdapterPtr>& adapters)
 
             checkServantNameValid(servant, sPrefix);
 
-            ServantHelperManager::getInstance()->setAdapterServant(adapterName[i], servant);
+            _servantHelper->setAdapterServant(adapterName[i], servant);
 
             TC_EpollServer::BindAdapterPtr bindAdapter = new TC_EpollServer::BindAdapter(_epollServer.get());
-               
+
+            //init auth & ssl
+	        setAdapter(bindAdapter, adapterName[i]);
 
             string sLastPath = "/tars/application/server/" + adapterName[i];
+            TC_Endpoint ep;
+            ep.parse(_conf[sLastPath + "<endpoint>"]);
+            if (ep.getHost() == "localip")
+            {
+                ep.setHost(ServerConfig::LocalIp);
+            }
 
             bindAdapter->setName(adapterName[i]);
 
@@ -1138,11 +1365,11 @@ void Application::bindAdapter(vector<TC_EpollServer::BindAdapterPtr>& adapters)
 
             bindAdapter->setMaxConns(TC_Common::strto<int>(_conf.get(sLastPath + "<maxconns>", "128")));
 
-            bindAdapter->setOrder(parseOrder(_conf.get(sLastPath + "<order>","allow,deny")));
+            bindAdapter->setOrder(parseOrder(_conf.get(sLastPath + "<order>", "allow,deny")));
 
             bindAdapter->setAllow(TC_Common::sepstr<string>(_conf[sLastPath + "<allow>"], ";,", false));
 
-            bindAdapter->setDeny(TC_Common::sepstr<string>(_conf.get(sLastPath + "<deny>",""), ";,", false));
+            bindAdapter->setDeny(TC_Common::sepstr<string>(_conf.get(sLastPath + "<deny>", ""), ";,", false));
 
             bindAdapter->setQueueCapacity(TC_Common::strto<int>(_conf.get(sLastPath + "<queuecap>", "1024")));
 
@@ -1150,16 +1377,28 @@ void Application::bindAdapter(vector<TC_EpollServer::BindAdapterPtr>& adapters)
 
             bindAdapter->setProtocolName(_conf.get(sLastPath + "<protocol>", "tars"));
 
-            if (bindAdapter->isTarsProtocol())
+	        bindAdapter->setBackPacketBuffLimit(ServerConfig::BackPacketLimit);
+	        bindAdapter->setBackPacketBuffMin(ServerConfig::BackPacketMin);
+
+	        if (bindAdapter->isTarsProtocol())
             {
                 bindAdapter->setProtocol(AppProtocol::parse);
             }
 
-            bindAdapter->setHandleGroupName(_conf.get(sLastPath + "<handlegroup>", adapterName[i]));
+            //校验ssl正常初始化
+#if TARS_SSL
+            if (bindAdapter->getEndpoint().isSSL() && (!(bindAdapter->getSSLCtx())))
+            {
+                cout << "load server ssl error, no cert config!" << bindAdapter->getEndpoint().toString() << endl;
+                exit(-1);
+            }
+#endif
+            bindAdapter->setHandle<ServantHandle>(TC_Common::strto<int>(_conf.get(sLastPath + "<threads>", "1")), this);
 
-            bindAdapter->setHandleNum(TC_Common::strto<int>(_conf.get(sLastPath + "<threads>", "0")));
-
-            bindAdapter->setBackPacketBuffLimit(iBackPacketBuffLimit);
+            if(ServerConfig::ManualListen) {
+                //手工监听
+                bindAdapter->enableManualListen();
+            }
 
             _epollServer->bind(bindAdapter);
 
@@ -1184,17 +1423,17 @@ void Application::bindAdapter(vector<TC_EpollServer::BindAdapterPtr>& adapters)
 
 void Application::checkServantNameValid(const string& servant, const string& sPrefix)
 {
-    if((servant.length() <= sPrefix.length()) || (servant.substr(0, sPrefix.length()) != sPrefix))
+    if ((servant.length() <= sPrefix.length()) || (servant.substr(0, sPrefix.length()) != sPrefix))
     {
         ostringstream os;
 
         os << "Servant '" << servant << "' error: must be start with '" << sPrefix << "'";
 
-        TarsRemoteNotify::getInstance()->report("exit:" + os.str());
+        RemoteNotify::getInstance()->report("exit:" + os.str());
 
+	    std::this_thread::sleep_for(std::chrono::milliseconds(100)); //稍微休息一下, 让当前处理包能够回复
         cout << os.str() << endl;
 
-        terminate();
 
         exit(-1);
     }
@@ -1202,20 +1441,19 @@ void Application::checkServantNameValid(const string& servant, const string& sPr
 
 void Application::outAdapter(ostream &os, const string &v, TC_EpollServer::BindAdapterPtr lsPtr)
 {
-    os << outfill("name")             << lsPtr->getName() << endl;
-    os << outfill("servant")          << v << endl;
-    os << outfill("endpoint")         << lsPtr->getEndpoint().toString() << endl;
-    os << outfill("maxconns")         << lsPtr->getMaxConns() << endl;
-    os << outfill("queuecap")         << lsPtr->getQueueCapacity() << endl;
-    os << outfill("queuetimeout")     << lsPtr->getQueueTimeout() << "ms" << endl;
-    os << outfill("order")            << (lsPtr->getOrder()==TC_EpollServer::BindAdapter::ALLOW_DENY?"allow,deny":"deny,allow") << endl;
-    os << outfill("allow")            << TC_Common::tostr(lsPtr->getAllow()) << endl;
-    os << outfill("deny")             << TC_Common::tostr(lsPtr->getDeny()) << endl;
-    os << outfill("queuesize")        << lsPtr->getRecvBufferSize() << endl;
-    os << outfill("connections")      << lsPtr->getNowConnection() << endl;
-    os << outfill("protocol")         << lsPtr->getProtocolName() << endl;
-    os << outfill("handlegroup")      << lsPtr->getHandleGroupName() << endl;
-    os << outfill("handlethread")     << lsPtr->getHandleNum() << endl;
+    os << TC_Common::outfill("name")             << lsPtr->getName() << endl;
+    os << TC_Common::outfill("servant")          << v << endl;
+    os << TC_Common::outfill("endpoint")         << lsPtr->getEndpoint().toString() << endl;
+    os << TC_Common::outfill("maxconns")         << lsPtr->getMaxConns() << endl;
+    os << TC_Common::outfill("queuecap")         << lsPtr->getQueueCapacity() << endl;
+    os << TC_Common::outfill("queuetimeout")     << lsPtr->getQueueTimeout() << "ms" << endl;
+    os << TC_Common::outfill("order")            << (lsPtr->getOrder() == TC_EpollServer::BindAdapter::ALLOW_DENY ? "allow,deny" : "deny,allow") << endl;
+    os << TC_Common::outfill("allow")            << TC_Common::tostr(lsPtr->getAllow()) << endl;
+    os << TC_Common::outfill("deny")             << TC_Common::tostr(lsPtr->getDeny()) << endl;
+    // os << outfill("queuesize")        << lsPtr->getRecvBufferSize() << endl;
+    os << TC_Common::outfill("connections")      << lsPtr->getNowConnection() << endl;
+    os << TC_Common::outfill("protocol")         << lsPtr->getProtocolName() << endl;
+    os << TC_Common::outfill("handlethread")     << lsPtr->getHandleNum() << endl;
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////
 }

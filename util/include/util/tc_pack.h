@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -17,11 +17,11 @@
 #ifndef __TC_PACK_H_
 #define __TC_PACK_H_
 
-#include <netinet/in.h>
+#include "util/tc_platform.h"
 #include <vector>
 #include <map>
 #include <string>
-#include <assert.h>
+#include <cassert>
 #include "util/tc_ex.h"
 
 namespace tars
@@ -46,8 +46,7 @@ namespace tars
 */
 struct TC_PackIn_Exception : public TC_Exception
 {
-    TC_PackIn_Exception(const string &buffer) : TC_Exception(buffer){};
-    TC_PackIn_Exception(const string &buffer, int err) : TC_Exception(buffer, err){};
+	TC_PackIn_Exception(const string &buffer) : TC_Exception(buffer){};
     ~TC_PackIn_Exception() throw(){};
 };
 
@@ -105,11 +104,10 @@ protected:
                  return;
             }
 
-            if(_nPos > _buffer.length())
-            {
-                assert(false);
-                //throw TC_PackIn_Exception("TC_PackIn cur has beyond error.");
-            }
+            // if(_nPos > _buffer.length())
+            // {
+            //     throw TC_PackIn_Exception("TC_PackIn cur has beyond error.");
+            // }
 
             if(_bInsert)
             {

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -15,112 +15,68 @@
  */
 
 #include "servant/EndpointInfo.h"
-#include "servant/TarsLogger.h"
+#include "servant/RemoteLogger.h"
 #include "servant/NetworkUtil.h"
 #include "util/tc_socket.h"
 
 namespace tars
 {
 EndpointInfo::EndpointInfo()
-: _port(0)
-, _grid(0)
-, _qos(0)
-, _type(TCP)
-, _weight(-1)
-, _weighttype(0)
-, _authType(0)
-, _isIPv6(false)
 {
     _setDivision.clear();
-    memset(&_addr,0,sizeof(_addr));
+
+	memset(&_addr,0,sizeof(_addr));
+
 }
 
-EndpointInfo::EndpointInfo(const string& host, uint16_t port, EndpointInfo::EType type, int32_t grid, const string & setDivision, int qos, int weight, unsigned int weighttype, int authType)
-: _host(host)
-, _port(port)
-, _grid(grid)
-, _qos(qos)
-, _type(type)
+EndpointInfo::EndpointInfo(const TC_Endpoint &ep, const string &setDivision)
+: _ep(ep)
 , _setDivision(setDivision)
-, _weight(weight)
-, _weighttype(weighttype)
-, _authType(authType)
+, _addressSucc(false)
 {
-    _isIPv6 = TC_Socket::addressIsIPv6(host);
-    try
+	_cmpDesc = createCompareDesc();
+	_desc = createDesc();
+}
+
+EndpointInfo::EndpointInfo(const EndpointF &ep)
+: _setDivision(ep.setId), _addressSucc(false)
+{
+	_ep.setHost(ep.host);
+	_ep.setPort(ep.port);
+	_ep.setTimeout(ep.timeout);
+	_ep.setType((TC_Endpoint::EType)ep.istcp);
+	_ep.setGrid(ep.grid);
+	_ep.setQos(ep.qos);
+	_ep.setWeight(ep.weight);
+	_ep.setWeightType(ep.weightType);
+	_ep.setAuthType(ep.authType);
+	_cmpDesc = createCompareDesc();
+	_desc = createDesc();
+}
+
+void EndpointInfo::parseConnectAddress()
+{
+    if (isConnectIPv6())
     {
-        if(_weighttype == 0)
-        {
-            _weight = -1;
-        }
-        else
-        {
-            if(_weight == -1)
-            {    
-                _weight = 100;
-            }
-
-            _weight = (_weight > 100 ? 100 : _weight);
-        }
-
-        if (_isIPv6)
-        {
-            NetworkUtil::getAddress(_host, _port, _addr.in6);
-        }
-        else
-        {
-            NetworkUtil::getAddress(_host, _port, _addr.in);
-        }
-
-        _cmpDesc = createCompareDesc();
-
-        _desc = createDesc();
+        TC_Socket::parseAddrWithPort(getConnectEndpoint()->getHost(), getConnectEndpoint()->getPort(), _addr.in6);
     }
-    catch (...)
+    else
     {
-        TLOGERROR("[ERROR:getAddress fail:" << _host << ":" << _port << "]" << endl);
+        TC_Socket::parseAddrWithPort(getConnectEndpoint()->getHost(), getConnectEndpoint()->getPort(), _addr.in);
     }
 }
 
 string EndpointInfo::createCompareDesc()
 {
-    ostringstream os;
-    if (_type == EndpointInfo::UDP) { os << "udp:"; }
-    if (_type == EndpointInfo::TCP) { os << "tcp:"; }
-    if (_type == EndpointInfo::SSL) { os << "ssl:"; }
-    os << _grid << ":" << _host << ":" << _port
-       << ":" << _setDivision << ":" << _qos << ":" << _weight << ":" << _weighttype << ":" << _authType;
+	stringstream ss;
+	ss << _ep.getType() << ":" << _ep.getHost() << ":" << _ep.getPort();
 
-    return os.str();
+	return ss.str();
 }
 
 string EndpointInfo::createDesc() const
 {
-    ostringstream os;
-
-    if (_type == EndpointInfo::TCP)
-        os << "tcp";
-    else if (_type == EndpointInfo::UDP)
-        os << "udp";
-    else
-        os << "ssl";
-
-    os << " -h " << host();
-    os << " -p " << port();
-    if(0 != _grid)
-        os << " -g " << _grid;
-
-    if (!_setDivision.empty())
-    {
-        os << " -s " << _setDivision;
-    }
-
-    if(0 != _qos)
-        os << " -q " << _qos;
-    if(0 != _authType)
-		os << " -e " << _authType;
-
-    return os.str();
+	return _ep.toString();
 }
 
 bool EndpointInfo::operator == (const EndpointInfo& r) const
@@ -133,34 +89,34 @@ bool EndpointInfo::operator < (const EndpointInfo& r) const
     return (_cmpDesc < r._cmpDesc);
 }
 
-string EndpointInfo::host() const
+const string &EndpointInfo::host() const
 {
-    return string(_host);
+    return _ep.getHost();
 }
 
 int32_t EndpointInfo::grid() const
 {
-    return _grid;
+    return _ep.getGrid();
 }
 
 uint16_t EndpointInfo::port() const
 {
-    return _port;
+    return _ep.getPort();
 }
 
-const struct sockaddr_in& EndpointInfo::addr() const
+bool EndpointInfo::isTcp() const
 {
-    return _addr.in;
+	return _ep.isTcp();
 }
 
-const struct sockaddr * EndpointInfo::addrPtr() const
-{
-    return _isIPv6 ? (struct sockaddr *)&_addr.in6 : (struct sockaddr *)&_addr.in;
-}
+//const struct sockaddr_in& EndpointInfo::addr() const
+//{
+//    return _addr.in;
+//}
 
-EndpointInfo::EType EndpointInfo::type() const
+const struct sockaddr * EndpointInfo::connectAddrPtr() const
 {
-    return _type;
+	return getConnectEndpoint()->isIPv6() ? (struct sockaddr *)&_addr.in6 : (struct sockaddr *)&_addr.in;
 }
 
 const string& EndpointInfo::setDivision() const

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -64,7 +64,7 @@ static TC_DYN_Init _init_TC_DYN_Object(&TC_DYN_Object::classTC_DYN_Object);
 
 TC_DYN_RuntimeClass* TC_DYN_Object::GetRuntimeClass() const
 {
-    return &TC_DYN_Object::classTC_DYN_Object;
+	return &TC_DYN_Object::classTC_DYN_Object;
 }
 
 bool TC_DYN_Object::isKindOf(const TC_DYN_RuntimeClass* pClass) const

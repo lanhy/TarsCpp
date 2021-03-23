@@ -1,4 +1,4 @@
-// Generates C++ tars service interface out of Protobuf IDL.
+﻿// Generates C++ tars service interface out of Protobuf IDL.
 //
 // This is a Proto2 compiler plugin.  See net/proto2/compiler/proto/plugin.proto
 // and net/proto2/compiler/public/plugin.h for more information on plugins.
@@ -16,9 +16,9 @@ static std::string GenMethods(const ::google::protobuf::MethodDescriptor* method
     std::string out;
     out.reserve(8 * 1024);
 
-    out += "virtual " + pkg + "::" + method->output_type()->name() + " " + method->name() +
-           "(const " + pkg + "::" + method->input_type()->name() + "& , tars::TarsCurrentPtr current) = 0;" + LineFeed(indent);
-    out += "static void async_response_" + method->name() + "(tars::TarsCurrentPtr current, const " + pkg + "::" + method->output_type()->name() + "&_ret)" + LineFeed(indent);
+    out += "virtual " + ToCppNamespace(method->output_type()->full_name()) + " " + method->name() +
+           "(const " + ToCppNamespace(method->input_type()->full_name()) + "& , tars::TarsCurrentPtr current) = 0;" + LineFeed(indent);
+    out += "static void async_response_" + method->name() + "(tars::TarsCurrentPtr current, const " + ToCppNamespace(method->output_type()->full_name()) + "&_ret)" + LineFeed(indent);
     out += "{" + LineFeed(++indent);
     out += "std::string _os;" + LineFeed(indent) +
            " _ret.SerializeToString(&_os);" + LineFeed(indent) + 
@@ -43,11 +43,11 @@ static std::string GenDispatchCase(const ::google::protobuf::MethodDescriptor* m
            "_is.setBuffer(_current->getRequestBuffer());" + LineFeed(indent);
     out += LineFeed(indent);
 
-    out += pkg + "::" + method->input_type()->name() + " req;" + LineFeed(indent);
+    out += ToCppNamespace(method->input_type()->full_name()) + " req;" + LineFeed(indent);
     out += "req.ParseFromArray(&_current->getRequestBuffer()[0], _current->getRequestBuffer().size());" + LineFeed(indent);
     out += LineFeed(indent);
 
-    out += pkg + "::" + method->output_type()->name() + " _ret = " + method->name() + "(req, _current);" +  LineFeed(indent);
+    out += ToCppNamespace(method->output_type()->full_name()) + " _ret = " + method->name() + "(req, _current);" +  LineFeed(indent);
     out += "if (_current->isResponse())" + LineFeed(indent);
     out += "{" + LineFeed(++indent);
     out += "std::string _os;" + LineFeed(indent);
@@ -84,8 +84,16 @@ std::string GenServant(const ::google::protobuf::ServiceDescriptor* desc, int in
     out += "virtual ~" + servant + "() {}";
     out += LineFeed(indent);
 
-    for (int i = 0; i < desc->method_count(); ++i) {
-        out += GenMethods(desc->method(i), pkg, indent);
+    //sort by method name
+    std::map<std::string, const ::google::protobuf::MethodDescriptor*> m_method;
+    for (int i = 0; i < desc->method_count(); ++i)
+    {
+    	m_method[desc->method(i)->name()] = desc->method(i);
+    }
+
+    for(auto it = m_method.begin(); it != m_method.end(); ++it)
+    {
+    	out += GenMethods(it->second, pkg, indent);
     }
 
     // gen onDispatch
@@ -97,10 +105,11 @@ std::string GenServant(const ::google::protobuf::ServiceDescriptor* desc, int in
     out += "static ::std::string __all[] = ";
     out += "{";
     out += LineFeed(++indent);
-    for (int i = 0; i < desc->method_count(); ++i) {
-        auto method = desc->method(i);
-        out += "\"" + method->name() + "\",";
-        out += LineFeed(indent);
+    for(auto it = m_method.begin(); it != m_method.end(); ++it)
+    {
+    	auto method = it->second;
+    	out += "\"" + method->name() + "\",";
+		out += LineFeed(indent);
     }
     out += LineFeed(--indent);
     out += "};";
@@ -113,14 +122,18 @@ std::string GenServant(const ::google::protobuf::ServiceDescriptor* desc, int in
     out += LineFeed(indent);
     out += "{";
     out += LineFeed(++indent);
-    for (int i = 0; i < desc->method_count(); ++i) {
-        auto method = desc->method(i);
-        out += LineFeed(indent);
-        out += "case " + std::to_string((long long)i) + ":";
-        out += LineFeed(indent);
+    int i = 0;
+    for(auto it = m_method.begin(); it != m_method.end(); ++it)
+	{
+    	auto method = it->second;
+    	out += LineFeed(indent);
+		out += "case " + std::to_string((long long)i) + ":";
+		out += LineFeed(indent);
 
-        out += GenDispatchCase(method, pkg, indent);
-    }
+		out += GenDispatchCase(method, pkg, indent);
+
+		++i;
+	}
 
     // end switch
     out += LineFeed(--indent);

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -22,6 +22,7 @@
 #include "util/tc_epoller.h"
 #include "util/tc_loop_queue.h"
 #include "servant/Message.h"
+#include "servant/EndpointInfo.h"
 #include <set>
 
 namespace tars
@@ -43,6 +44,8 @@ struct FDInfo
     {
         ET_C_NOTIFY = 1,
         ET_C_NET    = 2,
+        ET_C_TERMINATE  = 3,
+	    ET_C_UPDATE_LIST= 4,
     };
 
     /**
@@ -50,7 +53,6 @@ struct FDInfo
      */
     FDInfo()
     : iSeq(0)
-    , fd(-1)
     , iType(ET_C_NOTIFY)
     , p(NULL)
     {
@@ -64,12 +66,16 @@ struct FDInfo
     }
 
     size_t iSeq;
-
-    int    fd;
-
-    int    iType;
-
+    int iType;
     void * p;
+    TC_Epoller::NotifyInfo notify;
+};
+
+struct UpdateListInfo
+{
+	ServantPrx prx;
+	set<EndpointInfo> active;
+	set<EndpointInfo> inactive;
 };
 
 ////////////////////////////////////////////////////////////////////////
@@ -79,33 +85,6 @@ struct FDInfo
 class CommunicatorEpoll : public TC_Thread ,public TC_ThreadRecMutex
 {
 public:
-    struct NotifyInfo
-    {
-        /**
-         * 构造函数
-         */
-        NotifyInfo()
-        : eventFd(-1)
-        , bValid(false)
-        {
-        }
-
-        /**
-         * 析构函数
-         */
-        ~NotifyInfo()
-        {
-        }
-
-        
-        FDInfo    stFDInfo;   //通知FD信息
-        
-        TC_Socket notify;     //通知fd
-
-        int       eventFd;    //eventfd,目前未使用
-        
-        bool      bValid;     //是否有效
-    };
 
     /**
      * 构造函数
@@ -179,7 +158,7 @@ public:
      * @param event
      * @param handle
      */
-    void addFd(int fd,FDInfo * info, uint32_t events);
+    int addFd(int fd,FDInfo * info, uint32_t events);
 
     /**
      * 取消已注册的handle
@@ -188,25 +167,48 @@ public:
      * @param event
      * @param handle
      */
-    void delFd(int fd,FDInfo * info, uint32_t events);
+    int delFd(int fd,FDInfo * info, uint32_t events);
+
+    /**
+     * mod handle
+     * @param fd
+     * @param info
+     * @param events
+     * @return
+     */
+    int modFd(int fd,FDInfo * info, uint32_t events);
 
     /**
      * 通知事件过来
-     * @param fd
-     */
-    void notify(size_t iSeq,ReqInfoQueue * pReqQueue);
-
-    /**
-     * 通知删除事件过来
      * @param iSeq
      */
+    void notify(size_t iSeq,ReqInfoQueue * pReqQueue);
     void notifyDel(size_t iSeq);
+
+    /**
+     * 主动更新ip list
+     * @param active
+     * @param inactive
+     */
+    void notifyUpdateEndpoints(const ServantPrx &prx, const set<EndpointInfo> & active,const set<EndpointInfo> & inactive);
 
     /**
      * 数据加入到异步线程队列里面
      * @return
      */
     void pushAsyncThreadQueue(ReqMessage * msg);
+
+	/**
+	 * set reconnect
+	 * @param time
+	 */
+	void reConnect(int64_t ms, Transceiver*);
+
+	/**
+	 * communicator resource desc
+	 * @return
+	 */
+	string getResourcesInfo();
 
 protected:
     /**
@@ -215,7 +217,7 @@ protected:
      * @param pFDInfo
      * @param events
      */
-    void handle(FDInfo * pFDInfo, uint32_t events);
+    void handle(FDInfo * pFDInfo, const epoll_event &ev);
 
     /**
      * 输入事件
@@ -241,28 +243,33 @@ protected:
      */
     void doStat();
 
+    /**
+     * reconnect
+     */
+    void reConnect();
+
 protected:
     /*
      * 通信器
      */
     Communicator *         _communicator;
 
-    /*
-     * 请求事件通知数组
+    /**
+     * notify
      */
-    NotifyInfo             _notify[MAX_CLIENT_NOTIFYEVENT_NUM];
+    FDInfo*                 _notify[MAX_CLIENT_NOTIFYEVENT_NUM];
 
     /*
-     * 关闭线程请求的事件通知
-     */
-    TC_Socket              _shutdown;
-
-    /*
-     * 线程是否终止
+     * terminate thread
      */
     bool                   _terminate;
 
-    /*
+    /**
+     * terminate fd info
+     */
+    FDInfo                 _terminateFDInfo;
+
+	/*
      * epoll
      */
     TC_Epoller             _ep;
@@ -283,44 +290,24 @@ protected:
     ObjectProxyFactory *   _objectProxyFactory;
 
     /*
-     * 异步线程数组
-     */
-    AsyncProcThread *      _asyncThread[MAX_CLIENT_ASYNCTHREAD_NUM];
-
-    /*
-     * 异步线程数目
-     */
-    size_t                 _asyncThreadNum;
-
-    /*
-     * 分发给异步线程的索引seq
-     */
-    size_t                 _asyncSeq;
-
-    /*
      * 网络线程的id号
      */
     size_t                 _netThreadSeq;
 
     /*
-     * 异步队列的统计上报的对象
-     */
-    PropertyReport *       _reportAsyncQueue;
-
-    /*
      * 节点ip队列未发送请求的大小限制
      */
     size_t                 _noSendQueueLimit;
-
-    /*
-     * epoll wait的超时时间
-     */
-    int64_t                _waitTimeout;
-
+    
     /*
      * 超时的检查时间间隔
      */
     int64_t                _timeoutCheckInterval;
+
+    /**
+     * auto reconnect Transceiver
+     */
+    map<int64_t, Transceiver*> _reconnect;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////

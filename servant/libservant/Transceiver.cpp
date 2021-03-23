@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -14,24 +14,21 @@
  * specific language governing permissions and limitations under the License.
  */
 
-#include <sys/uio.h>
 #include "servant/Transceiver.h"
 #include "servant/AdapterProxy.h"
 #include "servant/Application.h"
-#include "servant/TarsLogger.h"
-//#include "servant/AuthLogic.h"
-#include "servant/Auth.h"
+#include "servant/RemoteLogger.h"
+#include "servant/ProxyInfo.h"
 
 #if TARS_SSL
 #include "util/tc_openssl.h"
 #endif
 
-#if TARS_HTTP2
-#include "util/tc_nghttp2.h"
-#include "util/tc_http2clientmgr.h"
-#endif
 namespace tars
 {
+
+static const int BUFFER_SIZE = 16 * 1024;
+
 ///////////////////////////////////////////////////////////////////////
 Transceiver::Transceiver(AdapterProxy * pAdapterProxy,const EndpointInfo &ep)
 : _adapterProxy(pAdapterProxy)
@@ -40,15 +37,18 @@ Transceiver::Transceiver(AdapterProxy * pAdapterProxy,const EndpointInfo &ep)
 , _connStatus(eUnconnected)
 , _conTimeoutTime(0)
 , _authState(AUTH_INIT)
+, _sendBuffer(this)
+, _recvBuffer(this)
 {
     _fdInfo.iType = FDInfo::ET_C_NET;
     _fdInfo.p     = (void *)this;
-    _fdInfo.fd    = -1;
 }
 
 Transceiver::~Transceiver()
 {
     close();
+
+
 }
 
 void Transceiver::checkTimeout()
@@ -56,7 +56,7 @@ void Transceiver::checkTimeout()
     if(eConnecting == _connStatus && TNOWMS > _conTimeoutTime)
     {
         //链接超时
-        TLOGERROR("[TARS][Transceiver::checkTimeout ep:"<<_adapterProxy->endpoint().desc()<<" , connect timeout]"<<endl);
+        TLOGERROR("[Transceiver::checkTimeout ep:"<<_adapterProxy->endpoint().desc()<<" , connect timeout]"<<endl);
         _adapterProxy->setConTimeout(true);
         close();
     }
@@ -64,13 +64,11 @@ void Transceiver::checkTimeout()
 
 bool Transceiver::isSSL() const 
 { 
-    return _adapterProxy->endpoint().type() == EndpointInfo::SSL; 
+    return _adapterProxy->endpoint().type() == TC_Endpoint::SSL;
 }
 
 void Transceiver::reconnect()
 {
-    close();
-
     connect();
 }
 
@@ -86,21 +84,32 @@ void Transceiver::connect()
         return;
     }
 
-    int fd = -1;
+	_proxyPointer = _adapterProxy->getObjProxy()->getRootServantProxy()->getProxyInfo();
+    
+	if(_proxyPointer)
+	{
+		_ep.setProxyEndpoint(_proxyPointer->getEndpoint());
+	}
 
-    if (_ep.type() == EndpointInfo::UDP)
+    //每次连接前都重新解析一下地址, 避免dns变了!
+    _ep.parseConnectAddress();
+
+    if (_ep.type() == TC_Endpoint::UDP)
     {
-        fd = NetworkUtil::createSocket(true, false, _ep.isIPv6());
-        NetworkUtil::setBlock(fd, false);
+        _fd = NetworkUtil::createSocket(true, false, _ep.isConnectIPv6());
+
         _connStatus = eConnected;
+
+        _adapterProxy->getObjProxy()->getCommunicatorEpoll()->addFd(_fd, &_fdInfo, EPOLLIN | EPOLLOUT);
     }
     else
     {
-        fd = NetworkUtil::createSocket(false, false, _ep.isIPv6());
-        NetworkUtil::setBlock(fd, false);
+	    _fd = NetworkUtil::createSocket(false, false, _ep.isConnectIPv6());
+
+        _adapterProxy->getObjProxy()->getCommunicatorEpoll()->addFd(_fd, &_fdInfo, EPOLLIN | EPOLLOUT);
 
         socklen_t len = _ep.isIPv6() ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
-        bool bConnected = NetworkUtil::doConnect(fd, _ep.addrPtr(), len);
+        bool bConnected = NetworkUtil::doConnect(_fd, _ep.connectAddrPtr(), len);
         if(bConnected)
         {
             setConnected();
@@ -112,27 +121,25 @@ void Transceiver::connect()
         }
     }
 
-    _fd = fd;
+    TLOGTARS("[Transceiver::connect obj:" << _adapterProxy->getObjProxy()->name()
+        << ",connect:" << _ep.getConnectEndpoint()->toString() << ", fd:" << _fd << "]" << endl);
 
-    TLOGINFO("[TARS][Transceiver::connect objname:" << _adapterProxy->getObjProxy()->name() 
-        << ",connect:" << _ep.desc() << ",fd:" << _fd << "]" << endl);
-
-    //设置网络qos的dscp标志
-    if(0 != _ep.qos())
-    {
-        int iQos=_ep.qos();
-        ::setsockopt(fd,SOL_IP,IP_TOS,&iQos,sizeof(iQos));
-    }
+    // //设置网络qos的dscp标志
+    // if(0 != _ep.qos())
+    // {
+    //     int iQos=_ep.qos();
+    //     ::setsockopt(fd,SOL_IP,IP_TOS,&iQos,sizeof(iQos));
+    // }
 
     //设置套接口选项
     vector<SocketOpt> &socketOpts = _adapterProxy->getObjProxy()->getSocketOpt();
     for(size_t i=0; i<socketOpts.size(); ++i)
     {
-        if(setsockopt(_fd,socketOpts[i].level,socketOpts[i].optname,socketOpts[i].optval,socketOpts[i].optlen) == -1)
+        if(setsockopt(_fd,socketOpts[i].level,socketOpts[i].optname, (const char*)socketOpts[i].optval,socketOpts[i].optlen) == -1)
         {
-            TLOGERROR("[TARS][setsockopt error:" << NetworkUtil::errorToString(errno) 
+            TLOGERROR("[setsockopt error:" << TC_Exception::parseError(TC_Exception::getSystemCode()) 
                 << ",objname:" << _adapterProxy->getObjProxy()->name() 
-                << ",desc:" << _ep.desc()
+                << ",desc:" << _ep.getConnectEndpoint()->toString()
                 << ",fd:" << _fd
                 << ",level:" <<  socketOpts[i].level
                 << ",optname:" << socketOpts[i].optname
@@ -140,8 +147,6 @@ void Transceiver::connect()
                 <<"    ]"<< endl);
         }
     }
-
-    _adapterProxy->getObjProxy()->getCommunicatorEpoll()->addFd(fd, &_fdInfo, EPOLLIN|EPOLLOUT);
 }
 
 void Transceiver::setConnected()
@@ -150,72 +155,249 @@ void Transceiver::setConnected()
     _adapterProxy->setConTimeout(false);
     _adapterProxy->addConnExc(false);
 
-    _onConnect();
+	TLOGTARS("[tcp setConnected, " << _adapterProxy->getObjProxy()->name() << ",fd:" << _fd << "]" << endl);
+
+	if(_proxyPointer)
+	{
+		connectProxy();
+	}
+	else
+	{
+		onSetConnected();
+	}
 }
 
-void Transceiver::_onConnect()
+void Transceiver::onSetConnected()
+{
+	onConnect();
+
+	if(_adapterProxy->getObjProxy()->getPushCallback())
+	{
+		_adapterProxy->getObjProxy()->getPushCallback()->onConnect(*_ep.getConnectEndpoint());
+	}
+
+	_adapterProxy->onConnect();
+}
+
+void Transceiver::onConnect()
 {
 #if TARS_SSL
     if (isSSL())
     {
-        // 分配ssl对象
-        SSL* ssl = NewSSL("client");
-        if (!ssl)
+	    _openssl = _adapterProxy->getObjProxy()->getCommunicatorEpoll()->getCommunicator()->newClientSSL(_adapterProxy->getObjProxy()->getServantProxy()->tars_name());
+        if (!_openssl)
         {
             ObjectProxy* obj = _adapterProxy->getObjProxy();
-            TLOGERROR("[TARS][_onConnect:" << obj->name() << " can't find client SSL_CTX " << endl);
+            TLOGERROR("[onConnect:" << obj->name() << " can't find client SSL_CTX " << endl);
             this->close();
             return;
         }
 
-        _openssl.reset(new TC_OpenSSL());
-        _openssl->Init(ssl, false);
-        std::string out = _openssl->DoHandshake();
-        if (_openssl->HasError())
+	    _openssl->init(false);
+
+	    _openssl->setReadBufferSize(1024 * 8);
+	    _openssl->setWriteBufferSize(1024 * 8);
+
+	    _openssl->recvBuffer()->setConnection(this);
+
+        int ret = _openssl->doHandshake(_sendBuffer);
+        if (ret != 0)
         {
-            TLOGERROR("[TARS] SSL_connect failed " << endl);
+            TLOGERROR(" SSL_connect failed " << endl);
             this->close();
             return;
         }
 
         // send the encrypt data from write buffer
-        if (!out.empty())
+        if (!_sendBuffer.empty())
         {
-            this->sendRequest(out.data(), out.size(), true);
+	        TLOGTARS("[Transceiver::onConnect send handshake:" << _openssl->isHandshaked() << ", send handshake len:" << _sendBuffer.getBufferLength() << endl);
+
+	        ret = doRequest();
+
+            if (!isValid()) 
+            {
+                TLOGERROR("[Transceiver::onConnect send handshake failed, ret:" << ret << endl);
+                return;
+            }
         }
+
         return;
     }
 #endif
 
-    _doAuthReq();
+	doAuthReq();
 }
 
-void Transceiver::_doAuthReq()
+void Transceiver::connectProxy()
+{
+	assert(_proxyPointer);
+
+	vector<char> buff;
+
+	_proxyPointer->sendProxyPacket(buff, _ep.getEndpoint());
+
+    TLOGTARS("[Transceiver::connectProxy, size:" << buff.size() << ", proxy:" << _ep.getConnectEndpoint()->toString() << endl);
+
+	_sendBuffer.addBuffer(buff);
+
+	int ret = doRequest();
+    if (!isValid()) 
+    {
+        TLOGERROR("[Transceiver::connectProxy failed sendRequest to proxy, ret:" << ret << endl);
+    }
+}
+
+int Transceiver::doCheckProxy(const char *buff, size_t length)
+{
+	if(!_proxyPointer || _proxyPointer->isSuccess())
+		return 0;
+
+	bool succ = _proxyPointer->recvProxyPacket(buff, length);
+    if(!succ)
+    {
+    	close();
+        return -1;
+    }
+
+	if(!_proxyPointer->isSuccess())
+	{
+		connectProxy();
+	}
+	else
+	{
+		TLOGTARS("[Transceiver::connectProxy, succ]" << endl);
+
+		onSetConnected();
+	}
+
+	return 1;
+}
+
+void Transceiver::doAuthReq()
 {
     ObjectProxy* obj = _adapterProxy->getObjProxy();
-        
-    TLOGINFO("[TARS][_onConnect:" << obj->name() << " auth Type is " << _adapterProxy->endpoint().authType() << endl);
-    
-    _adapterProxy->doInvoke();
+
+    TLOGTARS("[Transceiver::doAuthReq obj:" << obj->name() << ", auth type:" << etos((AUTH_TYPE)_adapterProxy->endpoint().authType()) << endl);
+
+    if (_adapterProxy->endpoint().authType() == AUTH_TYPENONE)
+    {
+        _authState = AUTH_SUCC;
+        TLOGTARS("[Transceiver::doAuthReq doInvoke obj:" << obj->name() << ", auth type:" << etos((AUTH_TYPE)_adapterProxy->endpoint().authType()) << endl);
+        _adapterProxy->doInvoke(true);
+    }
+    else
+    {
+        TLOGTARS("[Transceiver::doAuthReq doInvoke obj:" << obj->name() << ", auth type:" << etos((AUTH_TYPE)_adapterProxy->endpoint().authType()) << endl);
+
+        BasicAuthInfo basic;
+        basic.sObjName      = obj->name();
+        basic.sAccessKey    = obj->getCommunicatorEpoll()->getCommunicator()->getServantProperty(obj->name(), "accesskey");
+        basic.sSecretKey    = obj->getCommunicatorEpoll()->getCommunicator()->getServantProperty(obj->name(), "secretkey");
+
+        this->sendAuthData(basic);
+    }
 }
 
-void Transceiver::close()
+void Transceiver::finishInvoke(shared_ptr<ResponsePacket> &rsp)
+{
+	if (_adapterProxy->endpoint().authType() == AUTH_TYPELOCAL && _authState != AUTH_SUCC)
+	{
+		std::string ret(rsp->sBuffer.begin(), rsp->sBuffer.end());
+		tars::AUTH_STATE tmp = AUTH_SUCC;
+		tars::stoe(ret, tmp);
+		tars::AUTH_STATE newstate = tmp;
+
+		TLOGTARS("[Transceiver::finishInvoke state: " << etos(_authState) << " -> " << etos(newstate) << endl);
+		setAuthState(newstate);
+
+		if (newstate == AUTH_SUCC)
+		{
+			// flush old buffered msg when auth is not complete
+			_adapterProxy->doInvoke(true);
+		}
+		else
+		{
+			TLOGERROR("[Transceiver::finishInvoke newstate: " << etos(newstate) << ", error close!" << endl);
+			close();
+		}
+
+		return;
+	}
+	_adapterProxy->finishInvoke(rsp);
+}
+
+bool Transceiver::sendAuthData(const BasicAuthInfo& info)
+{
+    assert (_authState != AUTH_SUCC);
+
+    ObjectProxy* objPrx = _adapterProxy->getObjProxy();
+
+    // 走框架的AK/SK认证
+    std::string out = tars::defaultCreateAuthReq(info);
+
+    const int kAuthType = 0x40;
+    RequestPacket request;
+    request.sFuncName       = "tarsInnerAuthServer";
+    request.sServantName    = "authServant";
+    request.iVersion        = TARSVERSION;
+    request.iRequestId      = 1;
+    request.cPacketType     = TARSNORMAL;
+    request.iMessageType    = kAuthType;
+    request.sBuffer.assign(out.begin(), out.end());
+
+#if TARS_SSL
+    if(this->isSSL()) {
+	    vector<char> buff = objPrx->getProxyProtocol().requestFunc(request, this);
+
+	    int ret = _openssl->write(buff.data(), (uint32_t) buff.size(), _sendBuffer);
+	    if(ret != 0)
+	    {
+		    TLOGERROR("[Transceiver::sendAuthData ssl write failed, obj:" << _adapterProxy->getObjProxy()->name() << ", error:" << _openssl->getErrMsg() << endl);
+		    return false;
+	    }
+    }
+    else {
+	    _sendBuffer.addBuffer(objPrx->getProxyProtocol().requestFunc(request, this));
+    }
+
+#else
+	_sendBuffer.addBuffer(objPrx->getProxyProtocol().requestFunc(request, this));
+
+#endif
+
+	TLOGTARS("[sendAuthData:" << objPrx->name() << " len: " << _sendBuffer.getBufferLength() << endl);
+
+	int ret = doRequest();
+    if (!isValid()) 
+    {
+        TLOGERROR("[Transceiver::sendAuthData failed sendRequest for Auth, ret:" << ret << endl);
+        return false;
+    }
+
+    return true;
+}
+
+void Transceiver::close(bool destructor )
 {
     if(!isValid()) return;
+
+    if(_proxyPointer)
+    {
+	    _proxyPointer->reset();
+    }
 
 #if TARS_SSL
     if (_openssl)
     {
-        _openssl->Release();
+        _openssl->release();
         _openssl.reset();
     }
 #endif
 
-#if TARS_HTTP2
-    Http2ClientSessionManager::getInstance()->delSession(_adapterProxy->getId());
-#endif
+    _adapterProxy->getObjProxy()->getCommunicatorEpoll()->delFd(_fd,&_fdInfo, 0);
 
-    _adapterProxy->getObjProxy()->getCommunicatorEpoll()->delFd(_fd,&_fdInfo,EPOLLIN|EPOLLOUT);
+    TLOGTARS("[Transceiver::close fd:" << _fd << "]" << endl);
 
     NetworkUtil::closeSocketNoThrow(_fd);
 
@@ -223,103 +405,145 @@ void Transceiver::close()
 
     _fd = -1;
 
-    _sendBuffer.Clear();
+	_sendBuffer.clearBuffers();
 
-    _recvBuffer.Clear();
+	_recvBuffer.clearBuffers();
 
     _authState = AUTH_INIT;
 
-    TLOGINFO("[TARS][trans close:"<< _adapterProxy->getObjProxy()->name()<< "," << _ep.desc() << "]" << endl);
+	//如果从析构函数调用close，则不走以下流程
+    if (!destructor)
+    {
+        if (_adapterProxy->getObjProxy()->getPushCallback())
+        {
+            _adapterProxy->getObjProxy()->getPushCallback()->onClose(*_ep.getConnectEndpoint());
+        }
+
+        int second = _adapterProxy->getObjProxy()->reconnect();
+        if (second > 0) 
+        {
+            int64_t nextTryConnectTime = TNOWMS + second * 1000;
+            _adapterProxy->getObjProxy()->getCommunicatorEpoll()->reConnect(nextTryConnectTime, this);
+            TLOGTARS("[trans close:" << _adapterProxy->getObjProxy()->name() << "," << _ep.getConnectEndpoint()->toString() << ", reconnect:" << second << "]" << endl);
+        }
+    }
 }
 
 int Transceiver::doRequest()
 {
-    if(!isValid())
+    if(!isValid()) return -1;
+
+	//buf不为空,先发送buffer的内容
+    while(!_sendBuffer.empty())
     {
-        return -1;
-    }
+    	auto data = _sendBuffer.getBufferPointer();
+    	assert(data.first != NULL && data.second != 0);
 
-    int iRet = 0;
+        int iRet = this->send(data.first, (uint32_t) data.second, 0);
 
-    //buf不为空,先发生buffer的内容
-    if(!_sendBuffer.IsEmpty())
-    {
-        size_t length = 0;
-        void* data = NULL;
-        _sendBuffer.PeekData(data, length);
-
-        iRet = this->send(data, length, 0);
-
-        //失败，直接返回
-        if(iRet < 0)
+        if (iRet < 0)
         {
-            return iRet;
+            return -2;
         }
 
-        if(iRet > 0)
-        {
-            _sendBuffer.Consume(iRet);
-            if (_sendBuffer.IsEmpty())
-                _sendBuffer.Shrink();
-            else
-                return 0;
-        }
+	    _sendBuffer.moveHeader(iRet);
     }
 
-    //取adapter里面积攒的数据
-    _adapterProxy->doInvoke();
-
-    //object里面应该是空的
-    assert(_adapterProxy->getObjProxy()->timeoutQSize()  == 0);
+	//取adapter里面积攒的数据
+    if(_sendBuffer.empty()) {
+        _adapterProxy->doInvoke(false);
+    }
 
     return 0;
 }
 
-int Transceiver::sendRequest(const char * pData, size_t iSize, bool forceSend)
+int Transceiver::sendRequest(const shared_ptr<TC_NetWorkBuffer::Buffer> &buff)
 {
     //空数据 直接返回成功
-    if(iSize == 0)
-    {
-        return eRetOk;
+    if(buff->empty()) {
+	    return eRetOk;
     }
 
-    if(_connStatus != eConnected)
-    {
-        return eRetError;
+    // assert(_sendBuffer.empty());
+    //buf不为空, 表示之前的数据还没发送完, 直接返回失败, 等buffer可写了,epoll会通知写事件
+    if(!_sendBuffer.empty()) {
+        //不应该运行到这里
+        TLOGTARS("[Transceiver::sendRequest should not happened, not empty obj: " << _adapterProxy->getObjProxy()->name() << endl);
+	    return eRetNotSend;
     }
-        
-    //buf不为空,直接返回失败
-    //等buffer可写了,epoll会通知写时间
-    if(!_sendBuffer.IsEmpty())
+
+    if(eConnected != _connStatus)
     {
-        return eRetError;
+        TLOGTARS("[Transceiver::sendRequest not connected: " << _adapterProxy->getObjProxy()->name() << endl);
+        return eRetNotSend;
+    }
+
+	if(_proxyPointer && !_proxyPointer->isSuccess()) {
+        TLOGTARS("[Transceiver::sendRequest proxy not ok: " << _adapterProxy->getObjProxy()->name() << endl);
+		return eRetNotSend;
+	}
+
+    if (_authState != AUTH_SUCC)
+    {
+#if TARS_SSL
+        if (isSSL() && !_openssl)
+        {
+            TLOGTARS("[Transceiver::sendRequest ssl not created: " << _adapterProxy->getObjProxy()->name() << endl);
+            return eRetNotSend;
+        }
+#endif
+        TLOGTARS("[Transceiver::sendRequest need auth: " << _adapterProxy->getObjProxy()->name() << endl);
+        return eRetNotSend; // 需要鉴权但还没通过，不能发送非认证消息
     }
 
 #if TARS_SSL
-    // 握手数据已加密,直接发送，会话数据需加密
-    std::string out;
-    if (isSSL() && _openssl->IsHandshaked())
+	// 握手数据已加密,直接发送，会话数据需加密
+	if (isSSL())
+	{
+		if(!_openssl->isHandshaked()) {
+			TLOGTARS("[Transceiver::sendRequest ssl need handshake, obj:" << _adapterProxy->getObjProxy()->name() << endl);
+			return eRetNotSend;
+		}
+
+		int ret = _openssl->write(buff->buffer(), (uint32_t) buff->length(), _sendBuffer);
+		if(ret != 0)
+		{
+			TLOGERROR("[Transceiver::sendRequest ssl write failed, obj:" << _adapterProxy->getObjProxy()->name() << ", error:" << _openssl->getErrMsg() << endl);
+            close();
+			return eRetError;
+		}
+	}
+    else
     {
-        out = _openssl->Write(pData, iSize);
-        pData = out.data();
-        iSize = out.size();
+        _sendBuffer.addBuffer(buff);
     }
+#else
+    _sendBuffer.addBuffer(buff);
 #endif
 
-    int iRet = this->send(pData,iSize,0);
-
-    //失败，直接返回
-    if(iRet < 0)
+    do
     {
-        return eRetError;
-    }
+        auto data = _sendBuffer.getBufferPointer();
 
-    //没有全部发送完,写buffer 返回成功
-    if(iRet < (int)iSize)
-    {
-        _sendBuffer.PushData(pData+iRet,iSize-iRet);
-        return eRetFull;
+        int iRet = this->send(data.first, (uint32_t) data.second, 0);
+        if(iRet < 0)
+        {
+            if(!isValid()) 
+            {
+                _sendBuffer.clearBuffers();
+                TLOGTARS("[Transceiver::sendRequest failed eRetError: data size:" << data.second << "]" << endl);
+                return eRetError;
+            } 
+            else
+            {
+                TLOGTARS("[Transceiver::sendRequest failed eRetFull]" << endl);
+                return eRetFull;
+            }
+        }
+
+        _sendBuffer.moveHeader(iRet);
     }
+    while(!_sendBuffer.empty());
 
     return eRetOk;
 }
@@ -330,183 +554,178 @@ TcpTransceiver::TcpTransceiver(AdapterProxy * pAdapterProxy, const EndpointInfo 
 {
 }
 
-int TcpTransceiver::doResponse(list<ResponsePacket>& done)
+
+int TcpTransceiver::doResponse()
 {
-    if(!isValid())
+    if(!isValid()) return -1;
+
+	int iRet = 0;
+
+    int recvCount = 0;
+	do
     {
-        return -1;
-    }
+	    char buff[BUFFER_SIZE] = {0x00};
 
-    int iRet = 0;
+	    if ((iRet = this->recv(buff, BUFFER_SIZE, 0)) > 0)
+	    {
+		    int check = doCheckProxy(buff, iRet);
+            if(check != 0)
+		    {
+		    	return 0;
+		    }
 
-    done.clear();
+		    TC_NetWorkBuffer *rbuf = &_recvBuffer;
+#if TARS_SSL
+		    if (isSSL())
+		    {
+			    const bool preHandshake = _openssl->isHandshaked();
+			    int ret = _openssl->read(buff, iRet, _sendBuffer);
+		        if (ret != 0)
+			    {
+				    TLOGERROR("[Transceiver::doResponse SSL_read handshake failed: " << _adapterProxy->getObjProxy()->name() << ", info:" << _openssl->getErrMsg() << endl);
+				    close();
+				    return -1;
+			    }
+			    else if(!_sendBuffer.empty())
+			    {
+				    TLOGTARS("[Transceiver::doResponse SSL_read prehandshake:" << preHandshake << ", handshake:" << _openssl->isHandshaked() << ", send handshake:" << _sendBuffer.getBufferLength() << endl);
 
-    do
-    {
-        _recvBuffer.AssureSpace(8 * 1024);
-        char stackBuffer[64 * 1024];
+				    int ret = doRequest();
 
-        struct iovec vecs[2];
-        vecs[0].iov_base = _recvBuffer.WriteAddr();
-        vecs[0].iov_len = _recvBuffer.WritableSize();
-        vecs[1].iov_base = stackBuffer;
-        vecs[1].iov_len = sizeof stackBuffer;
+                    if(ret < 0)
+                    {
+                        // doRequest失败 close fd
+                        if (!isValid()) 
+                        {
+                            TLOGERROR("[Transceiver::doResponse ssl doRequest failed. ret:" << ret << endl);
+                            return -1;
+                        }
+                        else
+                        {
+                            return 0;
+                        }
+                    }
+			    }
 
-        if ((iRet = this->readv(vecs, 2)) > 0)
-        {
-            if (static_cast<size_t>(iRet) <= vecs[0].iov_len)
-            {
-                _recvBuffer.Produce(iRet);
-            }
-            else
-            {
-                _recvBuffer.Produce(vecs[0].iov_len);
-                size_t stackBytes = static_cast<size_t>(iRet) - vecs[0].iov_len;
-                _recvBuffer.PushData(stackBuffer, stackBytes);
-            }
-        }
+			    if (!_openssl->isHandshaked())
+                {
+                    TLOGTARS("[Transceiver::doResponse not handshake, prehandshake:" << preHandshake << ", handshake:" << _openssl->isHandshaked() << endl);
+
+				    return 0;
+                }
+
+			    if (!preHandshake) {
+				    doAuthReq();
+					// doAuthReq失败，会close fd, 这里判断下是否还有效
+					if (!isValid()) {
+						TLOGERROR("[Transceiver::doResponse doAuthReq failed" << endl);
+						return -1;
+					}
+
+                    TLOGTARS("[Transceiver::doResponse prehandshake:" << preHandshake << ", handshake:" << _openssl->isHandshaked() << endl);
+			    }
+
+			    rbuf = _openssl->recvBuffer();
+		    }
+		    else
+		    {
+			    rbuf->addBuffer(buff, iRet);
+		    }
+#else
+		    rbuf->addBuffer(buff, iRet);
+#endif
+		    ++recvCount;
+
+		    try
+		    {
+			    TC_NetWorkBuffer::PACKET_TYPE ret;
+
+			    do
+		        {
+			        shared_ptr<ResponsePacket> rsp = std::make_shared<ResponsePacket>();
+
+			        ret = _adapterProxy->getObjProxy()->getProxyProtocol().responseFunc(*rbuf, *rsp.get());
+
+				    if (ret == TC_NetWorkBuffer::PACKET_ERR) {
+					    TLOGERROR( "[tcp doResponse," << _adapterProxy->getObjProxy()->name() << ", size:" << iRet << ", fd:" << _fd << "," << _ep.getConnectEndpoint()->toString() << ",tcp recv decode error" << endl);
+					    close();
+					    break;
+				    }
+				    else if (ret == TC_NetWorkBuffer::PACKET_FULL) {
+	                    finishInvoke(rsp);
+				    }
+					else if (ret == TC_NetWorkBuffer::PACKET_FULL_CLOSE) {
+						close();
+	                    finishInvoke(rsp);
+						break;
+					}
+				    else {
+					    break;
+				    }
+
+			    }
+			    while (ret == TC_NetWorkBuffer::PACKET_FULL);
+
+			    //接收的数据小于buffer大小, 内核会再次通知你
+			    if(iRet < BUFFER_SIZE)
+			    {
+				    break;
+			    }
+
+			    //收包太多了, 中断一下, 释放线程给send等
+			    if (recvCount >= 100 && isValid()) {
+				    _adapterProxy->getObjProxy()->getCommunicatorEpoll()->modFd(_fd, &_fdInfo, EPOLLIN | EPOLLOUT);
+				    break;
+			    }
+		    }
+		    catch (exception & ex) {
+			    TLOGERROR("[tcp doResponse," << _adapterProxy->getObjProxy()->name() << ",fd:" << _fd << ","
+			                                      << _ep.getConnectEndpoint()->toString() << ",tcp recv decode error:" << ex.what() << endl);
+
+			    close();
+		    }
+		    catch (...) {
+			    TLOGERROR("[tcp doResponse," << _adapterProxy->getObjProxy()->name() << ",fd:" << _fd << ","
+			                                      << _ep.getConnectEndpoint()->toString() << ",tcp recv decode error." << endl);
+
+			    close();
+		    }
+	    }
     }
     while (iRet>0);
 
-    TLOGINFO("[TARS][tcp doResponse objname:" << _adapterProxy->getObjProxy()->name() 
-        << ",fd:" << _fd << ",recvbuf:" << _recvBuffer.ReadableSize() << "]" << endl);
+//    TLOGTARS("[tcp doResponse, " << _adapterProxy->getObjProxy()->name() << ",fd:" << _fd << ", all recvbuf:" << _recvBuffer.getBufferLength() << "]" << endl);
 
-    if(!_recvBuffer.IsEmpty())
-    {
-        try
-        {
-            const char* data = _recvBuffer.ReadAddr();
-            size_t len = _recvBuffer.ReadableSize();
-#if TARS_SSL
-            if (isSSL())
-            {
-                const bool preNotHandshake = !_openssl->IsHandshaked();
-                std::string out;
-                if (!_openssl->Read(_recvBuffer.ReadAddr(), _recvBuffer.ReadableSize(), out))
-                {
-                    TLOGERROR("[TARS][SSL_connect Failed: " << _adapterProxy->getObjProxy()->name() << endl);
-                    this->close();
-                    return -1;
-                }
-                else
-                {
-                    sendRequest(out.data(), out.size(), true);
-                }
-
-                _recvBuffer.Clear();
-
-                if (!_openssl->IsHandshaked())
-                    return 0;
-
-                if (preNotHandshake) 
-                    _doAuthReq();
-                
-                std::string* plainBuf = _openssl->RecvBuffer();
-                data = plainBuf->data();
-                len  = plainBuf->size();
-            }
-#endif
-            size_t pos = 0;
-            ProxyProtocol& proto = _adapterProxy->getObjProxy()->getProxyProtocol();
-
-            if (proto.responseExFunc) 
-            {
-                long id = _adapterProxy->getId();
-                pos = proto.responseExFunc(data, len, done, (void*)id);
-            }
-            else
-            {
-                pos = proto.responseFunc(data, len, done);
-            }
-
-            if(pos > 0)
-            {
-#if TARS_SSL
-                if (isSSL())
-                {
-                    std::string* plainBuf = _openssl->RecvBuffer();
-                    plainBuf->erase(0, pos);
-                }
-                else
-#endif
-                {
-                    _recvBuffer.Consume(pos);
-                    if (_recvBuffer.Capacity() > 8 * 1024 * 1024)
-                        _recvBuffer.Shrink();
-                }
-            }
-        }
-        catch (exception &ex)
-        {
-            TLOGERROR("[TARS][tcp doResponse objname:" << _adapterProxy->getObjProxy()->name() 
-                << ",fd:" << _fd << ",desc:" << _ep.desc() << ",tcp recv decode error:" << ex.what() << endl);
-
-            close();
-        }
-        catch (...)
-        {
-            TLOGERROR("[TARS][tcp doResponse objname:" << _adapterProxy->getObjProxy()->name() 
-                << ",fd:" << _fd << ",desc" << _ep.desc() << ",tcp recv decode error." << endl);
-
-            close();
-        }
-    }
-
-    return done.empty()?0:1;
+	return 0;
 }
 
 int TcpTransceiver::send(const void* buf, uint32_t len, uint32_t flag)
 {
     //只有是连接状态才能收发数据
-    if(_connStatus != eConnected)
-    {
+    if(eConnected != _connStatus)
         return -1;
-    }
 
-    int iRet = ::send(_fd, buf, len, flag);
+	int iRet = ::send(_fd, (const char*)buf, len, flag);
 
-    if (iRet < 0 && errno != EAGAIN)
+	if (iRet < 0 && !TC_Socket::isPending())
     {
-        TLOGINFO("[TARS][tcp send objname:" << _adapterProxy->getObjProxy()->name() 
-            << ",fd:" << _fd << ",desc:" << _ep.desc() 
-            << ",fail! errno:" << errno << "," << strerror(errno) << ",close]" << endl);
+        TLOGTARS("[tcp send," << _adapterProxy->getObjProxy()->name() << ",fd:" << _fd << "," << _ep.getConnectEndpoint()->toString()
+            << ",fail! errno:" << TC_Exception::getSystemCode() << "," 
+            << TC_Exception::parseError(TC_Exception::getSystemCode()) << ",close]" << endl);
 
         close();
 
         return iRet;
     }
 
-    // EAGAIN不能认为是错误
-    if (iRet < 0 && errno == EAGAIN)
-        iRet = 0;
-
-    TLOGINFO("[TARS][tcp send," << _adapterProxy->getObjProxy()->name() << ",fd:" << _fd 
-        << ",desc:" << _ep.desc() << ",len:" << iRet << "]" << endl);
-
-    return iRet;
-}
-
-int TcpTransceiver::readv(const struct iovec* vecs, int32_t vcnt)
-{
-    //只有是连接状态才能收发数据
-    if(eConnected != _connStatus)
-        return -1;
-
-    int iRet = ::readv(_fd, vecs, vcnt);
-
-    if (iRet == 0 || (iRet < 0 && errno != EAGAIN))
+#if TARGET_PLATFORM_WINDOWS
+    if(iRet < 0 && TC_Socket::isPending())
     {
-        TLOGINFO("[TARS][tcp readv, " << _adapterProxy->getObjProxy()->name()
-                << ",fd:" << _fd << ", " << _ep.desc() <<",ret " << iRet
-                << ", fail! errno:" << errno << "," << strerror(errno) << ",close]" << endl);
-
-        close();
-
-        return 0;
+        _adapterProxy->getObjProxy()->getCommunicatorEpoll()->modFd(_fd, &_fdInfo, EPOLLIN | EPOLLOUT);        
     }
-
-    TLOGINFO("[TARS][tcp readv," << _adapterProxy->getObjProxy()->name()
-            << ",fd:" << _fd << "," << _ep.desc() << ",ret:" << iRet << "]" << endl);
+#endif    
+    TLOGTARS("[tcp send," << _adapterProxy->getObjProxy()->name() << ",fd:" << _fd << "," 
+        << _ep.getConnectEndpoint()->toString() << ",len:" << iRet <<"]" << endl);
 
     return iRet;
 }
@@ -514,26 +733,30 @@ int TcpTransceiver::readv(const struct iovec* vecs, int32_t vcnt)
 int TcpTransceiver::recv(void* buf, uint32_t len, uint32_t flag)
 {
     //只有是连接状态才能收发数据
-    if(_connStatus != eConnected)
-    {
+    if(eConnected != _connStatus)
         return -1;
-    }
 
-    int iRet = ::recv(_fd, buf, len, flag);
+    int iRet = ::recv(_fd, (char*)buf, len, flag);
 
-    if (iRet == 0 || (iRet < 0 && errno != EAGAIN))
+	if (iRet == 0 || (iRet < 0 && !TC_Socket::isPending()))
     {
-        TLOGINFO("[TARS][tcp recv objname:" << _adapterProxy->getObjProxy()->name()
-            << ",fd:" << _fd << ", " << _ep.desc() <<",ret " << iRet
-            << ", fail! errno:" << errno << "," << strerror(errno) << ",close]" << endl);
+        TLOGTARS("[tcp recv, " << _adapterProxy->getObjProxy()->name()
+                << ",fd:" << _fd << ", " << _ep.getConnectEndpoint()->toString() <<",ret " << iRet
+                << ", fail! errno:" << TC_Exception::getSystemCode() << "," << TC_Exception::parseError(TC_Exception::getSystemCode()) << ",close]" << endl);
 
         close();
 
         return 0;
     }
 
-    TLOGINFO("[TARS][tcp recv objname:" << _adapterProxy->getObjProxy()->name()
-        << ",fd:" << _fd << ",desc:" << _ep.desc() << ",ret:" << iRet << "]" << endl);
+#if TARGET_PLATFORM_WINDOWS
+    if(iRet < 0 && TC_Socket::isPending())
+    {
+        _adapterProxy->getObjProxy()->getCommunicatorEpoll()->modFd(_fd, &_fdInfo, EPOLLIN | EPOLLOUT);        
+    }
+#endif   
+    TLOGTARS("[tcp recv," << _adapterProxy->getObjProxy()->name()
+            << ",fd:" << _fd << "," << _ep.getConnectEndpoint()->toString() << ",ret:" << iRet << "]" << endl);
 
     return iRet;
 }
@@ -541,17 +764,17 @@ int TcpTransceiver::recv(void* buf, uint32_t len, uint32_t flag)
 /////////////////////////////////////////////////////////////////
 UdpTransceiver::UdpTransceiver(AdapterProxy * pAdapterProxy, const EndpointInfo &ep)
 : Transceiver(pAdapterProxy, ep)
-, _recvBuffer(NULL)
+,_pRecvBuffer(NULL)
 {
     // UDP不支持鉴权
     _authState = AUTH_SUCC;
 
-    if(!_recvBuffer)
+    if(!_pRecvBuffer)
     {
-        _recvBuffer = new char[DEFAULT_RECV_BUFFERSIZE];
-        if(!_recvBuffer)
+        _pRecvBuffer = new char[DEFAULT_RECV_BUFFERSIZE];
+        if(!_pRecvBuffer)
         {
-            throw TC_Exception("objproxy '" + _adapterProxy->getObjProxy()->name() + "' malloc udp receive buffer fail");
+            throw TC_Exception("obj: '" + _adapterProxy->getObjProxy()->name() + "' malloc udp receive buffer fail");
         }
     }
 
@@ -559,110 +782,117 @@ UdpTransceiver::UdpTransceiver(AdapterProxy * pAdapterProxy, const EndpointInfo 
 
 UdpTransceiver::~UdpTransceiver()
 {
-    if(_recvBuffer)
+    if(_pRecvBuffer)
     {
-        delete _recvBuffer;
-        _recvBuffer = NULL;
+        delete _pRecvBuffer;
+        _pRecvBuffer = NULL;
     }
 }
 
-int UdpTransceiver::doResponse(list<ResponsePacket>& done)
+
+int UdpTransceiver::doResponse()
 {
-    if(!isValid())
-    {
-        return -1;
-    }
+    if(!isValid()) return -1;
 
     int recv = 0;
 
-    done.clear();
+//    done.clear();
     do
     {
-        if ((recv = this->recv(_recvBuffer, DEFAULT_RECV_BUFFERSIZE, 0)) > 0)
+        if ((recv = this->recv(_pRecvBuffer, DEFAULT_RECV_BUFFERSIZE, 0)) > 0)
         {
-            TLOGINFO("[TARS][udp doResponse objname:" << _adapterProxy->getObjProxy()->name()
-                << ",fd:" << _fd << ",recvbuf:" << recv << "]" << endl);
+            TLOGTARS("[udp doResponse, " << _adapterProxy->getObjProxy()->name()
+                    << ",fd:" << _fd << ",recvbuf:" << recv << "]" << endl);
+
+	        _recvBuffer.clearBuffers();
+            _recvBuffer.addBuffer(_pRecvBuffer, recv);
 
             try
             {
-                _adapterProxy->getObjProxy()->getProxyProtocol().responseFunc(_recvBuffer, recv, done);
+	            shared_ptr<ResponsePacket> rsp = std::make_shared<ResponsePacket>();
+
+                TC_NetWorkBuffer::PACKET_TYPE ret;
+
+                ret = _adapterProxy->getObjProxy()->getProxyProtocol().responseFunc(_recvBuffer, *rsp.get());
+
+                if(ret == TC_NetWorkBuffer::PACKET_ERR || ret == TC_NetWorkBuffer::PACKET_LESS)
+                {
+                    TLOGERROR("[udp doResponse," << _adapterProxy->getObjProxy()->name() << ",fd:" << _fd << "," << _ep.getConnectEndpoint()->toString() << ",tcp recv decode error, ret:" << ret << endl);
+                    break;
+                }
+                else
+                {
+	                finishInvoke(rsp);
+                }
             }
             catch (exception &ex)
             {
-                TLOGERROR("[TARS][udp doResponse, " << _adapterProxy->getObjProxy()->name()
-                    << ",fd:" << _fd << ",desc:" << _ep.desc()
-                    << ", udp recv decode error:" << ex.what() << endl);
+                TLOGERROR("[udp doResponse, " << _adapterProxy->getObjProxy()->name()
+                        << ",fd:" << _fd << "," << _ep.getConnectEndpoint()->toString()
+                        << ", udp recv decode error:" << ex.what() << endl);
             }
             catch (...)
             {
-                TLOGERROR("[TARS][udp doResponse, " << _adapterProxy->getObjProxy()->name()
-                    << ",fd:" << _fd << ",desc:" << _ep.desc()
-                    << ", udp recv decode error." << endl);
+                TLOGERROR("[udp doResponse, " << _adapterProxy->getObjProxy()->name()
+                        << ",fd:" << _fd << "," << _ep.getConnectEndpoint()->toString()
+                        << ", udp recv decode error." << endl);
             }
         }
     }
     while (recv > 0);
 
-    return done.empty()?0:1;
+    return 0;
 }
 
 int UdpTransceiver::send(const void* buf, uint32_t len, uint32_t flag)
 {
-    if(!isValid())
-    {
-        return -1;
-    }
+    if(!isValid()) return -1;
 
-    int iRet = ::sendto(_fd, buf, len, flag, (struct sockaddr*) &(_ep.addr()), sizeof(sockaddr));
+	socklen_t addrlen = _ep.isIPv6() ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+	int iRet=::sendto(_fd, (const char*)buf, len, flag, _ep.connectAddrPtr(), addrlen);
 
-    if (iRet<0)
+	if (iRet<0)
     {
-        if(errno != EAGAIN)
+        if(!TC_Socket::isPending())
         {
-            TLOGERROR("[TARS][udp send objname:" << _adapterProxy->getObjProxy()->name()
-                << ",fd:" << _fd << ",desc:" << _ep.desc() 
-                << ", fail! errno:" << errno << "," << strerror(errno) << ",close]" << endl);
+            TLOGERROR("[udp send " << _adapterProxy->getObjProxy()->name()
+                    << ",fd:" << _fd << "," << _ep.getConnectEndpoint()->toString() << ", fail! errno:"
+                    << TC_Exception::getSystemCode() << "," 
+                    << TC_Exception::parseError(TC_Exception::getSystemCode()) << ",close]" << endl);
 
-            close();
+			close();
 
             return iRet;
         }
-
-        iRet = 0;
+        iRet=0;
     }
-    else if(iRet > 0 && iRet != (int)len)
+    else if(iRet>0 && iRet != (int)len)
     {
-        TLOGERROR("[TARS][udp send objname:" << _adapterProxy->getObjProxy()->name()
-                << ",fd:" << _fd << "," << _ep.desc() << ", send error."
+        TLOGERROR("[udp send, " << _adapterProxy->getObjProxy()->name()
+                << ",fd:" << _fd << "," << _ep.getConnectEndpoint()->toString() << ", send error."
                 << ", len:" << len << ", sendLen:" << iRet << endl);
-
         //udp只发一次 发送一半也算全部发送成功
         iRet = len;
     }
-
     return iRet;
 }
 
 int UdpTransceiver::recv(void* buf, uint32_t len, uint32_t flag)
 {
-    if(!isValid())
+    if(!isValid()) return -1;
+
+    int iRet = ::recvfrom(_fd, (char*)buf, len, flag, NULL, NULL); //need check from_ip & port
+
+    if (iRet < 0  && !TC_Socket::isPending())
     {
-        return -1;
+        TLOGERROR("[udp recv " << _adapterProxy->getObjProxy()->name() << ",fd:" << _fd << ","
+            << _ep.getConnectEndpoint()->toString() << ", fail! errno:" << TC_Exception::getSystemCode() << ","
+            << TC_Exception::parseError(TC_Exception::getSystemCode()) << ",close]" << endl);
+
+		close();
+
+		return 0;
     }
-
-    int iRet = ::recvfrom(_fd, buf, len, flag, NULL, NULL); //need check from_ip & port
-
-    if (iRet < 0  && errno != EAGAIN)
-    {
-        TLOGERROR("[TARS][udp recv objname:" << _adapterProxy->getObjProxy()->name() 
-            << ",fd:" << _fd << ",desc:" << _ep.desc() 
-            << ", fail! errno:" << errno << "," << strerror(errno) << ",close]" << endl);
-
-        close();
-
-        return 0;
-    }
-
     return iRet;
 }
 

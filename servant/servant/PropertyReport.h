@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -17,14 +17,18 @@
 #ifndef __TARS_PROPERTY_REPORT_H_
 #define __TARS_PROPERTY_REPORT_H_
 
+ #include "util/tc_lock.h"
 #include "util/tc_autoptr.h"
 #include "util/tc_thread_mutex.h"
-
+#include "util/tc_spin_lock.h"
 #include <tuple>
 #include <vector>
 #include <string>
 
 using namespace std;
+
+#undef max
+#undef min
 
 namespace tars
 {
@@ -45,7 +49,7 @@ public:
     /**
      * 获取该属性的服务名称
      */
-    std::string getMasterName() { return _sMasterName; }
+    const std::string &getMasterName() const { return _sMasterName; }
     
 public:
 
@@ -76,7 +80,7 @@ public:
         string get();
         void   set(int o)           { _sum += o;++_count; }
     protected:
-        void   clear()                { _sum = 0; _count = 0; }
+        void clear()                { _sum = 0; _count = 0; }
     private:
         int _sum;
         int _count;

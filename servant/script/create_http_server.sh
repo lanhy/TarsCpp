@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 if [ $# -lt 3 ]
 then
@@ -9,6 +9,11 @@ fi
 APP=$1
 SERVER=$2
 SERVANT=$3
+TARSPATH=$4
+
+if [ "$TARSPATH" == "" ]; then
+	TARSPATH=/usr/local/tars/
+fi 
 
 if [ "$SERVER" == "$SERVANT" ]
 then
@@ -24,7 +29,7 @@ fi
 
 echo "[create server: $APP.$SERVER ...]"
 
-DEMO_PATH=/usr/local/tars/cpp/script/http_demo
+DEMO_PATH=${TARSPATH}/cpp/script/http_demo
 
 cp $DEMO_PATH/* $APP/$SERVER/
 
@@ -39,7 +44,7 @@ do
 
 	cat $FILE | sed "s/DemoApp/$APP/g" > $FILE.tmp
 	mv $FILE.tmp $FILE
-	
+
 	cat $FILE | sed "s/DemoServant/$SERVANT/g" > $FILE.tmp
 	mv $FILE.tmp $FILE
 done

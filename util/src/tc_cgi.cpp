@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -13,11 +13,15 @@
  * CONDITIONS OF ANY KIND, either express or implied. See the License for the 
  * specific language governing permissions and limitations under the License.
  */
-
+#include "util/tc_platform.h"
 #include "util/tc_cgi.h"
 #include "util/tc_common.h"
 #include "util/tc_http.h"
 #include <string.h>
+
+#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
+extern char **environ;
+#endif
 
 namespace tars
 {
@@ -88,7 +92,9 @@ void TC_Cgi::setUpload(const string &sUploadFilePrefix, int iMaxUploadFiles, siz
 
 void TC_Cgi::parseCgi()
 {
+#if TARGET_PLATFORM_LINUX || TARGET_PLATFORM_IOS
     char **env = environ;
+  
     while(*env != NULL)
     {
         string s(*env);
@@ -99,7 +105,26 @@ void TC_Cgi::parseCgi()
         }
         ++env;
     }
-
+#else
+    LPCSTR env; 
+    LPVOID lpvEnv; 
+     
+    // Get a pointer to the environment block. 
+    lpvEnv = GetEnvironmentStrings(); 
+     
+    // Variable strings are separated by NULL byte, and the block is 
+    // terminated by a NULL byte. 
+    for (env = (LPCSTR) lpvEnv; *env; env++) 
+    { 
+        string s(env);
+        string::size_type pos = s.find('=');
+        if(pos != string::npos)
+        {
+            _env[s.substr(0, pos)] = s.substr(pos + 1);
+        }
+        // ++env;
+    } 
+#endif  
     _is = &cin;
 
     readCgiInput(_mmpParams, _mpCookies);
@@ -199,7 +224,7 @@ void TC_Cgi::parseNormal(multimap<string, string> &mmpParams, const string& sBuf
 
         if(iFlag == 0)
         {
-            while ( (pos < len) && (sBuffer[pos] != '=') )
+            while ( (sBuffer[pos] != '=') && (pos < len) )
             {
                 sTmp += (sBuffer[pos] == '+') ? ' ' : sBuffer[pos];
 
@@ -208,7 +233,7 @@ void TC_Cgi::parseNormal(multimap<string, string> &mmpParams, const string& sBuf
         }
         else
         {
-            while ( (pos < len) && (sBuffer[pos] != '&') )
+            while ( (sBuffer[pos] != '&') && (pos < len) )
             {
                 sTmp += (sBuffer[pos] == '+') ? ' ' : sBuffer[pos];
 
@@ -346,7 +371,7 @@ bool TC_Cgi::writeFile(FILE*fp, const string &sFileName, const string &sBuffer, 
     if(ret != (int)sBuffer.length())
     {
         fclose(fp);
-        throw TC_Cgi_Exception("[TC_Cgi::parseFormData] upload file '" + _mpUpload[sFileName]._sServerFileName + "' error:" + string(strerror(errno)));
+        throw TC_Cgi_Exception("[TC_Cgi::parseFormData] upload file '" + _mpUpload[sFileName]._sServerFileName + "' error", TC_Exception::getSystemCode());
     }
     iTotalWrite += sBuffer.length();
     _mpUpload[sFileName]._iSize = iTotalWrite;
@@ -413,7 +438,8 @@ void TC_Cgi::parseFormData(multimap<string, string> &mmpParams, const string &sB
                 if ( (fp = fopen(sUploadFileName.c_str(),"w")) == NULL)
                 {
                     mmpParams.clear();          //clear , exception safe
-                    throw TC_Cgi_Exception("[TC_Cgi::parseFormData] Upload File '" + sValue + "' to '" + sUploadFileName +"' error! " + string(strerror(errno)));
+                    THROW_EXCEPTION_SYSCODE(TC_Cgi_Exception, "[TC_Cgi::parseFormData] Upload File '" + sValue + "' to '" + sUploadFileName +"' error");
+                    // throw TC_Cgi_Exception("[TC_Cgi::parseFormData] Upload File '" + sValue + "' to '" + sUploadFileName +"' error! " + string(strerror(errno)));
                 }
             }
             else
@@ -436,10 +462,10 @@ void TC_Cgi::parseFormData(multimap<string, string> &mmpParams, const string &sB
             {
                 if(sLastBuffer.length() < 2)
                 {
-                    if(fp)
-                    {
-                        fclose(fp);
-                    }
+					if(fp)
+					{
+                    	fclose(fp);
+					}
                     throw TC_Cgi_Exception("[TC_Cgi::parseFormData] 'multipart/form-data' Format is error");
                 }
 
@@ -462,8 +488,8 @@ void TC_Cgi::parseFormData(multimap<string, string> &mmpParams, const string &sB
                 {
                     return;
                 }
-                {
-                    throw TC_Cgi_Exception("[TC_Cgi::parseFormData] 'multipart/form-data' Format is error");
+				{
+                	throw TC_Cgi_Exception("[TC_Cgi::parseFormData] 'multipart/form-data' Format is error");
                 }
             }
 
@@ -474,11 +500,11 @@ void TC_Cgi::parseFormData(multimap<string, string> &mmpParams, const string &sB
 
             sLastBuffer = sBuffer + "\n";
         }
-        if(fp)
-        {
-            fclose(fp);
-            fp = NULL;
-        }
+		if(fp)
+		{
+			fclose(fp);
+			fp = NULL;
+		}
     }
     else
     {
@@ -624,7 +650,7 @@ const map<string, string> &TC_Cgi::getCookiesMap() const
 
 bool  TC_Cgi::isUploadOverSize() const
 {
-    return _bUploadFileOverSize;
+	return _bUploadFileOverSize;
 }
 
 bool  TC_Cgi::isUploadOverSize(vector<TC_Cgi_Upload> &vtUploads) const
@@ -775,7 +801,7 @@ void TC_Cgi::setCgiEnv(const string &sName, const string &sValue)
 
 string TC_Cgi::htmlHeader(const string &sHeader)
 {
-    return "Content-type: " + sHeader + "\n\n";
+	return "Content-type: " + sHeader + "\n\n";
 }
 
 string TC_Cgi::decodeURL(const string &sUrl)
@@ -788,11 +814,11 @@ string TC_Cgi::decodeURL(const string &sUrl)
 
     while (pos < len)
     {
-        if(sUrl[pos] == '+')
-        {
-            sDecodeUrl += ' ';
-            ++pos;
-        }
+		if(sUrl[pos] == '+')
+		{
+			sDecodeUrl += ' ';
+			++pos;
+		}
         else if(sUrl[pos] == '%')
         {
             sDecodeUrl += TC_Common::x2c(sUrl.substr(pos + 1));
@@ -819,10 +845,6 @@ string TC_Cgi::encodeURL(const string &sUrl)
         char c = sUrl[i];
         if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
             result.append(1, c);
-        else if(c == ' ')
-        {
-            result.append(1, '+');
-        }
         else
         {
             result.append(1, '%');

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -22,10 +22,9 @@
 namespace tars
 {
 
-class TarsCurrent;
+class Current;
 class Application;
 
-////////////////////////////////////////////////////////////////////////
 /**
  * 管理Servant
  */
@@ -58,13 +57,13 @@ public:
      * 关闭服务
      * @param current
      */
-    void shutdown(TarsCurrentPtr current);
+    void shutdown(CurrentPtr current);
 
     /**
-     * 管理命令通知
+     * 通知
      * @param command
      */
-    string notify(const string &command, TarsCurrentPtr current);
+    string notify(const string &command, CurrentPtr current);
 
 };
 ////////////////////////////////////////////////////////////////

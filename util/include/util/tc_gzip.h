@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -17,11 +17,13 @@
 #ifndef __TC_GZIP_H
 #define __TC_GZIP_H
 
+#include  "util/tc_platform.h"
+
 #include <string>
 #include <vector>
-#include <zlib.h>
 #include <string.h>
 #include <cassert>
+#include <memory>
 
 using namespace std;
 
@@ -31,155 +33,133 @@ namespace tars
 /** 
 * @file tc_gzip.h 
 * @brief  gzip类, 封装的zlib库
+* @brief  Gzip Class, Encapsulated zlib Library
 */
 
 /////////////////////////////////////////////////
 
 /**
 * @brief 该类提供标准GZIP压缩和解压算法
+* @brief This class provides standard GZIP compression and decompression algorithms
 */
 class TC_GZip
 {
 protected:
-    struct Output2Vector {
-        Output2Vector(vector<char>& buffer) : _buffer(buffer)
+	struct Output
+	{
+		virtual ~Output(){}
+		virtual void operator ()(char *begin, size_t length) = 0;
+	};
+
+	template<typename T>
+    struct OutputImp : public Output {
+	    OutputImp(T & buffer) : _buffer(buffer)
         {
             _buffer.clear();
         }
-        void operator ()(char *begin, size_t length)
+
+        virtual void operator ()(char *begin, size_t length)
         {
             _buffer.insert(_buffer.end(), begin, begin + length);
         }
 
-        vector<char>& _buffer;
-    };
-
-    struct Output2String {
-        Output2String(string& buffer) : _buffer(buffer)
-        {
-            _buffer.clear();
-        }
-        void operator ()(char *begin, size_t length)
-        {
-            _buffer.append(begin, length);
-        }
-
-        string& _buffer;
+        T&  _buffer;
     };
 
 public:
     /**
     * @brief  对数据进行压缩
+    * @brief  Compress data
     *  
     * @param src         需要压缩的数据
+    * @param src         Data that needs to be compressed
     * @param length      数据长度
+    * @param length      Data length
     * @param buffer      输出buffer
+    * @param buffer      output buffer 
     * @return bool       成功失败
+    * @return bool       sucessfull or failed
     */
     static bool compress(const char *src, size_t length, vector<char>& buffer);
 
     /**
+    * @brief  对数据进行压缩
+    * @brief  Compress data
+    *  
+    * @param src         需要压缩的数据
+    * @param src         data need to be compressed
+    * @param length      数据长度
+    * @param length      data length
+    * @param buffer      输出buffer
+    * @param buffer      output buffer
+    * @return bool       成功失败
+    * @return bool       sucessfull or failed
+    */    
+    static bool compress(const char *src, size_t length, string& buffer);
+    
+    /**
     * @brief  对数据进行解压
+    * @brief  Unzip data
     *  
     * @param src         需要解压的数据
+    * @param src         data need to be decompressed
     * @param length      数据长度
+    * @param length      data length
     * @param buffer      输出buffer
+    * @param buffer      output buffer
     * @return bool       成功失败
+    * @return bool       sucessfull or failed
     */
     static bool uncompress(const char *src, size_t length, vector<char>& buffer)
     {
-        Output2Vector output(buffer);
+        std::unique_ptr<Output> output(new OutputImp<vector<char>>(buffer));
 
-        return uncompress(src, length, output);
+        return uncompress(src, length, output.get());
     }
 
     /**
     * @brief  对数据进行解压
+    * @brief  Unzip data
     *  
     * @param src         需要解压的数据
+    * @param src         data need to be decompressed
     * @param length      数据长度
+    * @param length      data length
     * @param buffer      输出buffer
+    * @param buffer      output buffer
     * @return bool       成功失败
+    * @return bool       sucessfull or failed
     */
     static bool uncompress(const char *src, size_t length, string& buffer)
     {
-        Output2String output(buffer);
+	    std::unique_ptr<Output> output(new OutputImp<string>(buffer));
 
-        return uncompress(src, length, output);
+        return uncompress(src, length, output.get());
     }
 
     /**
     * @brief  对数据进行分片解压, 
     *         每次解压的数据调用Output输出
+    * @brief  Decompress data in pieces, 
+    *         Output output is invoked for each decompressed data call
     *  
     * @param src         需要解压的数据
+    * @param src         data need to be decompressed
     * @param length      数据长度
+    * @param length      data length
     * @param o           输出buffer的函数对象 
+    * @param o           function project for output buffer
     *                    struct Output
     *                    {
     *                        void operator()(char *begin, size_t
     *                      length);
     *                      }
     * @return bool       成功失败
+    * @return bool       sucessfull or failed
     */
-    template<typename Output>
-    static bool uncompress(const char *src, size_t length, Output& o)
-    {
-//        buffer.clear();
-
-        z_stream strm;
-
-        /* allocate inflate state */
-        strm.zalloc   = Z_NULL;
-        strm.zfree    = Z_NULL;
-        strm.opaque   = Z_NULL;
-        strm.avail_in = 0;
-        strm.next_in  = Z_NULL;
-
-        int ret = inflateInit2(&strm, 47);
-
-        if (ret != Z_OK)
-        {
-            return false;
-        }
-
-        strm.avail_in = length;
-        strm.next_in  = (unsigned char *)src;
-
-        static size_t CHUNK = 1024 * 256;
-        unsigned char *out  = new unsigned char[CHUNK];
-
-        /* run inflate() on input until output buffer not full */
-        do
-        {
-            strm.avail_out = CHUNK;
-            strm.next_out  = out;
-
-            ret = inflate(&strm, Z_NO_FLUSH);
-
-            assert(ret != Z_STREAM_ERROR); /* state not clobbered */
-            switch (ret)
-            {
-            case Z_NEED_DICT:
-                ret = Z_DATA_ERROR;     /* and fall through */
-            case Z_DATA_ERROR:
-            case Z_MEM_ERROR:
-                inflateEnd(&strm);
-                delete[] out;
-                return false;
-            }
-            o((char *)out, CHUNK - strm.avail_out);
-            //           buffer.insert(buffer.end(), (char *)out, (char *)out + CHUNK - strm.avail_out);
-        }
-        while (strm.avail_out == 0);
-
-        /* clean up and return */
-        inflateEnd(&strm);
-        delete[] out;
-
-        return (ret == Z_STREAM_END);
-    }
+    static bool uncompress(const char *src, size_t length, Output* o);
 };
 
 }
+//#endif
 #endif

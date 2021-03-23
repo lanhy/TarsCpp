@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -58,7 +58,7 @@ string CodeGenerator::generateAsync(const NamespacePtr &nPtr, const InterfacePtr
     {
         sParams += "_ret";
 
-        // 写入 Dependent 列表
+        // push the symbol into dependent list
         getDataType(oPtr->getReturnPtr()->getTypePtr());
     }
 
@@ -89,8 +89,8 @@ string CodeGenerator::generateAsync(const NamespacePtr &nPtr, const InterfacePtr
     str << TAB << PROTOCOL_VAR << "." << PROTOCOL_VAR << "Version = this.getRequestVersion();" << endl;
     if (oPtr->getReturnPtr()->getTypePtr())
     {
-        str << TAB << PROTOCOL_VAR << "." << toFunctionName(oPtr->getReturnPtr(), "write") << "(\"\", _ret" 
-            << (isRawOrString(oPtr->getReturnPtr()->getTypePtr()) ? ", 1" : "") << ");" << endl;
+        str << TAB << PROTOCOL_VAR << "." << toFunctionName(oPtr->getReturnPtr(), "write") << "(\"\", _ret"
+            << representArgument(oPtr->getReturnPtr()->getTypePtr()) << ");" << endl;
     }
     for (size_t i = 0; i < vParamDecl.size(); i++)
     {
@@ -98,19 +98,43 @@ string CodeGenerator::generateAsync(const NamespacePtr &nPtr, const InterfacePtr
 
         str << TAB << PROTOCOL_VAR << "." << toFunctionName(vParamDecl[i]->getTypeIdPtr(), "write") << "(\"" 
             << vParamDecl[i]->getTypeIdPtr()->getId() << "\", " << vParamDecl[i]->getTypeIdPtr()->getId()
-            << (isRawOrString(vParamDecl[i]->getTypeIdPtr()->getTypePtr()) ? ", 1" : "") << ");" << endl;
+            << representArgument(vParamDecl[i]->getTypeIdPtr()->getTypePtr()) << ");" << endl;
     }
     str << endl;
     str << TAB << "this.doResponse(" << PROTOCOL_VAR << ".encode());" << endl;
     DEL_TAB;
+
+    //// ========= 增加对 JSON_VERSION 支持
+    str << TAB << "} else if (this.getRequestVersion() === " << PROTOCOL_JSON << ") {" << endl;
+
+    INC_TAB;
+    str << TAB << "var _data_ = {};" << endl;
+    if (oPtr->getReturnPtr()->getTypePtr())
+    {
+        str << TAB << "_data_[\"tars_ret\"] = _ret;" << endl;
+    }
+    for (size_t i = 0; i < vParamDecl.size(); i++)
+    {
+        if (!vParamDecl[i]->isOut())
+            continue;
+
+        str << TAB << "_data_[\"" << vParamDecl[i]->getTypeIdPtr()->getId() << "\"] = " << vParamDecl[i]->getTypeIdPtr()->getId()
+            << ".toObject ? " << vParamDecl[i]->getTypeIdPtr()->getId() << ".toObject() : "
+            << vParamDecl[i]->getTypeIdPtr()->getId() << ";" << endl;
+    }
+    str << endl;
+    str << TAB << " this.doResponse(new TarsStream.BinBuffer(Buffer.from(JSON.stringify(_data_))));" << endl;
+    DEL_TAB;
+    //// =========
+
     str << TAB << "} else {" << endl;
 
     INC_TAB;
     str << TAB << "var os = new " << IDL_NAMESPACE_STR << "Stream." << IDL_TYPE << "OutputStream();" << endl;
     if (oPtr->getReturnPtr()->getTypePtr())
     {
-        str << TAB << "os." << toFunctionName(oPtr->getReturnPtr(), "write") << "(0, _ret" 
-            << (isRawOrString(oPtr->getReturnPtr()->getTypePtr()) ? ", 1" : "") << ");" << endl;
+        str << TAB << "os." << toFunctionName(oPtr->getReturnPtr(), "write") << "(0, _ret"
+            << representArgument(oPtr->getReturnPtr()->getTypePtr()) << ");" << endl;
     }
     for (size_t i = 0; i < vParamDecl.size(); i++)
     {
@@ -118,7 +142,7 @@ string CodeGenerator::generateAsync(const NamespacePtr &nPtr, const InterfacePtr
 
         str << TAB << "os." << toFunctionName(vParamDecl[i]->getTypeIdPtr(), "write") << "(" 
             << (i + 1) << ", " << vParamDecl[i]->getTypeIdPtr()->getId()
-            << (isRawOrString(vParamDecl[i]->getTypeIdPtr()->getTypePtr()) ? ", 1" : "") << ");" << endl;
+            << representArgument(vParamDecl[i]->getTypeIdPtr()->getTypePtr()) << ");" << endl;
     }
     str << endl;
     str << TAB << "this.doResponse(os.getBinBuffer());" << endl;
@@ -172,12 +196,36 @@ string CodeGenerator::generateDispatch(const NamespacePtr &nPtr, const Interface
         if (vParamDecl[i]->isOut())
         {
             dstr << ", " << getDefault(vParamDecl[i]->getTypeIdPtr(), "", nPtr->getId(), true)
-                    << (isRawOrString(vParamDecl[i]->getTypeIdPtr()->getTypePtr()) ? ", 1" : "");
+                    << representArgument(vParamDecl[i]->getTypeIdPtr()->getTypePtr());
         }
         
         dstr << ");" << endl;
     }
     DEL_TAB;
+
+    //// ========= 增加对 JSON_VERSION 支持
+    dstr << TAB << "} else if (current.getRequestVersion() === " << PROTOCOL_JSON << ") {" << endl;
+    INC_TAB;
+    dstr << TAB << "var _data_ = JSON.parse(binBuffer.toNodeBuffer());" << endl;
+
+    for (size_t i = 0; i < vParamDecl.size(); i++)
+    {
+        if (vParamDecl[i]->isOut())
+        {
+            dstr << TAB << vParamDecl[i]->getTypeIdPtr()->getId()
+                 << " = _data_." << vParamDecl[i]->getTypeIdPtr()->getId() << " || " << getDefault(vParamDecl[i]->getTypeIdPtr(), "", nPtr->getId(), true)
+                 << ";" << endl;
+        }
+        else
+        {
+            dstr << TAB << vParamDecl[i]->getTypeIdPtr()->getId()
+                 << " = _data_." << vParamDecl[i]->getTypeIdPtr()->getId()
+                 << ";" << endl;
+        }
+    }
+    DEL_TAB;
+    //// ========= 
+
     dstr << TAB << "} else {" << endl;
 
     INC_TAB;
@@ -194,7 +242,7 @@ string CodeGenerator::generateDispatch(const NamespacePtr &nPtr, const Interface
         if (isSimple(vParamDecl[i]->getTypeIdPtr()->getTypePtr()))
         {
             dstr << getDefault(vParamDecl[i]->getTypeIdPtr(), vParamDecl[i]->getTypeIdPtr()->def(), nPtr->getId())
-                    << (isRawOrString(vParamDecl[i]->getTypeIdPtr()->getTypePtr()) ? ", 1" : "");
+                    << representArgument(vParamDecl[i]->getTypeIdPtr()->getTypePtr());
         }
         else 
         {
@@ -243,7 +291,7 @@ string CodeGenerator::generateJSServer(const InterfacePtr &pPtr, const Namespace
     ostringstream str;
     vector<OperationPtr> & vOperation = pPtr->getAllOperationPtr();
 
-    //生成类
+    // generate the implementation class
     str << TAB << nPtr->getId() << "." << pPtr->getId() << "Imp = function () { " << endl;
     INC_TAB;
     str << TAB << "this._name   = undefined;" << endl;
@@ -251,10 +299,10 @@ string CodeGenerator::generateJSServer(const InterfacePtr &pPtr, const Namespace
     DEL_TAB;
     str << TAB << "};" << endl << endl;
 
-    //生成初始化函数
+    // generate the initialize function
     str << TAB << nPtr->getId() << "." << pPtr->getId() << "Imp.prototype.initialize = function () {};" << endl << endl;
 
-    //生成分发函数
+    // generate the dispatch function
     str << TAB << nPtr->getId() << "." << pPtr->getId() << "Imp.prototype.onDispatch = function (current, funcName, binBuffer) { " << endl;
     INC_TAB;
     str << TAB << "if (\"__\" + funcName in this) {" << endl;
@@ -269,10 +317,10 @@ string CodeGenerator::generateJSServer(const InterfacePtr &pPtr, const Namespace
     DEL_TAB;
     str << TAB << "};" << endl << endl;
 
-    //生成 PING 方法
+    // generate the ping function
     str << generatePing(nPtr, pPtr) << endl;
 
-    //生成接口函数
+    // generate functions
     for (size_t i = 0; i < vOperation.size(); i++)
     {
         str << generateJSServer(nPtr, pPtr, vOperation[i]) << endl;
@@ -321,13 +369,14 @@ bool CodeGenerator::generateJSServer(const ContextPtr &pPtr)
         }
     }
 
-    //生成编解码 + 服务类
+    // generate server classes with encoders and decoders
     ostringstream estr;
     bool bNeedAssert = false;
     bool bNeedStream = false;
+    bool bQuickFunc = false;
     for(size_t i = 0; i < namespaces.size(); i++)
     {
-        estr << generateJS(namespaces[i], bNeedStream, bNeedAssert);
+        estr << generateJS(namespaces[i], bNeedStream, bNeedAssert, bQuickFunc);
     }
 
     bool bNeedRpc = false;
@@ -341,7 +390,7 @@ bool CodeGenerator::generateJSServer(const ContextPtr &pPtr)
         return false;
     }
 
-    //再生成导入模块
+    // generate module imports
     ostringstream ostr;
     if (bNeedAssert)
     {
@@ -363,10 +412,17 @@ bool CodeGenerator::generateJSServer(const ContextPtr &pPtr)
 
         ostr << TAB << "var " << it->second.sModule << " = require(\"" << it->second.sFile << "\");" << endl;
     }
+    if (bQuickFunc)
+    {
+        ostr << endl;
+        ostr << TAB << "var _hasOwnProperty = Object.prototype.hasOwnProperty;" << endl;
+    }
 
     ostringstream str;
 
     str << printHeaderRemark("Server");
+    str << DISABLE_ESLINT << endl;
+    str << endl;
     str << "\"use strict\";" << endl << endl;
     str << ostr.str() << endl;
     str << istr.str();
@@ -374,7 +430,7 @@ bool CodeGenerator::generateJSServer(const ContextPtr &pPtr)
 
     string sFileName = TC_File::excludeFileExt(_sToPath + TC_File::extractFileName(pPtr->getFileName())) + ".js";
 
-    TC_File::makeDirRecursive(_sToPath, 0755);
+    TC_File::makeDirRecursive(_sToPath);
     makeUTF8File(sFileName, str.str());
 
     return true;

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -52,7 +52,7 @@ namespace tars
  */
 struct TC_SHA_Exception : public TC_Exception
 {
-    TC_SHA_Exception(const string &buffer, int err) : TC_Exception(buffer, err){};
+    TC_SHA_Exception(const string &buffer, bool err) : TC_Exception(buffer, err){};
     ~TC_SHA_Exception() throw(){};
 };
 

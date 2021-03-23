@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -20,6 +20,7 @@
 #include "util/tc_monitor.h"
 #include <cassert>
 #include <cstdlib>
+#include <mutex>
 
 namespace tars
 {
@@ -93,8 +94,33 @@ public:
     }
 
     /**
-     * @brief 释放. 
-     *  
+	 * @brief 释放. 
+	 *  
+     * @param t
+     */
+    static void destroy(T *t) 
+    { 
+        delete t; 
+    }
+};
+
+template<typename T>
+class CreateUsingNew1
+{
+public:
+    /**
+	 * @brief  创建.
+	 *  
+     * @return T*
+     */
+    static T* create() 
+    { 
+        return new T; 
+    }
+
+    /**
+	 * @brief 释放. 
+	 *  
      * @param t
      */
     static void destroy(T *t) 
@@ -138,9 +164,35 @@ public:
     }
 };
 
+template<typename T>
+class CreateRealStatic
+{
+public:
+    /**
+	 * @brief   创建.
+     *
+     * @return T*
+     */
+    static T* create()
+    {
+        static T t;
+        return &t;
+    }
+
+    /**
+	 * @brief   释放.
+	 *
+     * @param t
+     */
+    static void destroy(T *t)
+    {
+    }
+};
+
 ////////////////////////////////////////////////////////////////
 /**
  * @brief 定义LifetimePolicy:定义对象的声明周期管理
+ * 进程退出时销毁对象
  */
 template<typename T>
 class DefaultLifetime
@@ -157,6 +209,12 @@ public:
     }
 };
 
+/**
+ * @brief,
+ *       对象被销毁后可以重生(比如log,全局任何时候都需要)
+ *
+ * @author jarod (7/29/2015)
+ */
 template<typename T>
 class PhoneixLifetime
 {
@@ -177,10 +235,15 @@ private:
 template <class T> 
 bool PhoneixLifetime<T>::_bDestroyedOnce = false; 
 
-template <typename T> 
-struct NoDestroyLifetime 
-{ 
-    static void scheduleDestruction(T*, void (*)()) 
+/**
+ * @brief 不做对象销毁
+ *
+ * @author jarod (7/29/2015)
+ */
+template <typename T>
+struct NoDestroyLifetime
+{
+    static void scheduleDestruction(T*, void (*)())
     {
     } 
 
@@ -194,14 +257,16 @@ struct NoDestroyLifetime
 template
 <
     typename T,
-    template<class> class CreatePolicy   = CreateUsingNew,
-    template<class> class LifetimePolicy = DefaultLifetime
+    template<typename> class CreatePolicy   = CreateUsingNew,
+    template<typename> class LifetimePolicy = DefaultLifetime
 >
 class TC_Singleton 
 {
 public:
     typedef T  instance_type;
     typedef volatile T volatile_type;
+ 
+    typedef CreatePolicy<T> TCreatePolicy;
 
     /**
      * @brief 获取实例
@@ -210,57 +275,54 @@ public:
      */
     static T *getInstance()
     {
-        //加锁, 双check机制, 保证正确和效率
-        if(!_pInstance)
-        {
-            TC_ThreadLock::Lock lock(_tl);
-            if(!_pInstance)
-            {
-                if(_destroyed)
+        static std::mutex __mutex_singleton;
+
+        auto sin= __pInstance.load();
+        if ( !sin ){
+            std::lock_guard<std::mutex> myLock(__mutex_singleton);
+            sin= __pInstance.load();
+            if( !sin ){
+                if(__destroyed)
                 {
                     LifetimePolicy<T>::deadReference();
-                    _destroyed = false;
+                    __destroyed = false;
                 }
-                _pInstance = CreatePolicy<T>::create();
-                LifetimePolicy<T>::scheduleDestruction((T*)_pInstance, &destroySingleton);
+
+                sin = CreatePolicy<T>::create();
+                __pInstance.store(sin);
+                LifetimePolicy<T>::scheduleDestruction(__pInstance, &destroySingleton);
             }
         }
-        
-        return (T*)_pInstance;
+
+        return sin;
     }
-    
-    virtual ~TC_Singleton(){}; 
+
+    virtual ~TC_Singleton(){};
 
 protected:
-
     static void destroySingleton()
     {
-        assert(!_destroyed);
-        CreatePolicy<T>::destroy((T*)_pInstance);
-        _pInstance = NULL;
-        _destroyed = true;
+        assert(!__destroyed);
+        CreatePolicy<T>::destroy((T*)__pInstance);
+        __pInstance = NULL;
+        __destroyed = true;
     }
 protected:
 
-    static TC_ThreadLock    _tl;
-    static volatile T*      _pInstance;
-    static bool             _destroyed;
+    static atomic<T*>       __pInstance;
+    static bool             __destroyed;
 
 protected:
-    TC_Singleton(){}
-    TC_Singleton (const TC_Singleton &); 
-    TC_Singleton &operator=(const TC_Singleton &);
+    TC_Singleton() = default;
+    TC_Singleton (const TC_Singleton &) = default;
+    TC_Singleton &operator=(const TC_Singleton &) = default;
 };
 
-template <class T, template<class> class CreatePolicy, template<class> class LifetimePolicy> 
-TC_ThreadLock TC_Singleton<T, CreatePolicy, LifetimePolicy>::_tl; 
+template <class T, template<class> class CreatePolicy, template<class> class LifetimePolicy>
+bool TC_Singleton<T, CreatePolicy, LifetimePolicy>::__destroyed = false;
 
-template <class T, template<class> class CreatePolicy, template<class> class LifetimePolicy> 
-bool TC_Singleton<T, CreatePolicy, LifetimePolicy>::_destroyed = false; 
-
-template <class T, template<class> class CreatePolicy, template<class> class LifetimePolicy> 
-volatile T* TC_Singleton<T, CreatePolicy, LifetimePolicy>::_pInstance = NULL; 
-
+template <class T, template<class> class CreatePolicy, template<class> class LifetimePolicy>
+atomic<T*> TC_Singleton<T, CreatePolicy, LifetimePolicy>::__pInstance = {nullptr};
 }
 
 #endif

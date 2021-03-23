@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -17,11 +17,12 @@
 #ifndef __TARS_ENDPOINT_MANAGER_H_
 #define __TARS_ENDPOINT_MANAGER_H_
 
-#include "util/tc_consistent_hash_new.h"
 #include "servant/EndpointInfo.h"
 #include "servant/EndpointF.h"
 #include "servant/QueryF.h"
 #include "servant/AppProtocol.h"
+#include "util/tc_spin_lock.h"
+#include "util/tc_consistent_hash_new.h"
 
 namespace tars
 {
@@ -32,8 +33,8 @@ namespace tars
 enum  GetEndpointType
 {
     E_DEFAULT = 0,
-    E_ALL     = 1,
-    E_SET     = 2,
+    E_ALL = 1,
+    E_SET = 2,
     E_STATION = 3
 };
 
@@ -128,9 +129,9 @@ public:
      */
     virtual void doNotify() = 0;
 
-    /*
-     * 设置主控的代理
-     */
+	/*
+	 * 设置主控的代理
+	 */
     int  setLocatorPrx(QueryFPrx prx);
 
     /*
@@ -153,7 +154,12 @@ private:
      * 如果是间接连接，则设置主控代理，并从缓存中加载相应的列表
      */
     void setObjName(const string & sObjName);
-    
+
+    /*
+     * 解析endpoint
+     */
+    vector<string> sepEndpoint(const string& sEndpoints);
+
     /*
      * 从sEndpoints提取ip列表信息
      */
@@ -162,7 +168,7 @@ private:
     /*
      * 主控的请求的响应到了,做相应的处理
      */
-    void doEndpoints(const vector<tars::EndpointF>& activeEp, const vector<tars::EndpointF>& inactiveEp, int iRet, bool bSync = false);
+    void doEndpoints(const vector<EndpointF>& activeEp, const vector<EndpointF>& inactiveEp, int iRet, bool bSync = false);
 
     /*
      * 请求主控异常,做相应的处理
@@ -240,7 +246,11 @@ protected:
      */
     set<EndpointInfo>         _inactiveEndpoints;
 
-    
+    /**
+     * 是否是root servant
+     */
+	bool                      _rootServant;
+
 private:
 
     /////////以下是请求主控的策略信息/////////////////
@@ -329,7 +339,14 @@ public:
      */
     void notifyEndpoints(const set<EndpointInfo> & active, const set<EndpointInfo> & inactive, bool bSync = false);
 
-    /*
+    /**
+     * 更新
+     * @param active
+     * @param inactive
+     */
+	void updateEndpoints(const set<EndpointInfo> & active, const set<EndpointInfo> & inactive);
+
+	/*
      * 重写基类的实现
      */
     void doNotify();
@@ -357,7 +374,8 @@ private:
     /*
      * 根据hash值选取一个结点
      */
-    AdapterProxy* getHashProxy(int64_t hashCode, bool bConsistentHash = false);
+    AdapterProxy* getHashProxy(int64_t hashCode,  bool bConsistentHash = false);
+
 
     /*
      * 根据hash值按取模方式，从正常节点中选取一个结点
@@ -580,7 +598,8 @@ private:
     /*
      * 锁
      */
-    TC_ThreadLock            _lock;
+    // TC_ThreadLock            _mutex;
+    TC_SpinLock             _mutex;
 
 
     /*
@@ -675,7 +694,8 @@ private:
     /*
      * 锁
      */
-    TC_ThreadLock                  _lock;
+    // TC_ThreadLock                  _mutex;
+    TC_SpinLock                     _mutex;
 
     /*
      * 保存对象的map

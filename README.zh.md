@@ -1,3 +1,5 @@
+Tars整体介绍文档请阅读: https://tarscloud.gitbook.io/
+
 该工程是Tars RPC框架C++语言的源代码
 
 目录名称 |功能
@@ -19,7 +21,7 @@ linux内核版本:      |	2.6.18及以上版本
 gcc版本:          	|   4.1.2及以上版本、glibc-devel
 bison工具版本:      |	2.5及以上版本
 flex工具版本:       |	2.5及以上版本
-cmake版本：       	|   2.8.8及以上版本
+cmake版本：       	|   3.2及以上版本
 mysql版本：         |	4.1.17及以上版本
 
 编译和安装
@@ -31,4 +33,4 @@ make
 make install
 ```
 
-详细安装参见https://github.com/TarsCloud/Tars/blob/master/Install.zh.md
+详细安装参见[案例文档](https://tarscloud.github.io/TarsDocs/)

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -23,6 +23,7 @@
 #include "servant/EndpointInfo.h"
 #include "servant/EndpointF.h"
 #include "servant/AppProtocol.h"
+#include "servant/StatReport.h"
 #include "servant/Global.h"
 #include "util/tc_timeout_queue_noid.h"
 
@@ -36,13 +37,13 @@ class EndpointManager;
  */
 struct SocketOpt
 {
-    int        level;
+	int level;
 
-    int        optname;
+	int optname;
 
-    const void *optval;
+	const void *optval;
 
-    socklen_t  optlen;
+	SOCKET_LEN_TYPE optlen;
 };
 
 ///////////////////////////////////////////////////////////////////
@@ -67,30 +68,35 @@ public:
     ~ObjectProxy();
 
     /**
-     * 初始化
-     */
-    void initialize();
-
-    /**
      * 加载locator
      */
     int loadLocator();
-
+	
     /**
      * 方法调用
+     * @param req
+     * @return int
      */
-    void invoke(ReqMessage* msg);
+    void invoke(ReqMessage *  msg);
 
     /**
      * 发送积攒在obj的数据
      */
     void doInvoke();
 
+	/**
+     *
+     * @param active
+     * @param inactive
+     */
+	void onNotifyEndpoints(const set<EndpointInfo> & active,const set<EndpointInfo> & inactive);
+
     /**
      * 设置协议解析器
      * @return UserProtocol&
      */
-    void setProxyProtocol(const ProxyProtocol& protocol, const std::string& name = "tars");
+    void setProxyProtocol(const ProxyProtocol& protocol);
+
     /**
      * 获取协议解析器
      * @return ProxyProtocol&
@@ -98,15 +104,9 @@ public:
     ProxyProtocol& getProxyProtocol();
 
     /**
-     * 获取协议名字
-     * @return ProxyProtocol&
-     */
-    const std::string& getProtoName() const;
-
-    /**
-     * 设置套接口选项
-     */
-    void setSocketOpt(int level, int optname, const void *optval, socklen_t optlen);
+    *设置套接口选项
+    */
+    void setSocketOpt(int level, int optname, const void *optval, SOCKET_LEN_TYPE optlen);
 
     /**
      * 获取套接字选项
@@ -125,23 +125,20 @@ public:
     ServantProxyCallbackPtr getPushCallback();
 
     /**
+     * connected
+     */
+	void onConnect(AdapterProxy *adapterProxy);
+
+	/**
      * 获取所有的adapter
      */
-    const vector<AdapterProxy*> & getAdapters() const;
+    void mergeStat(map<StatMicMsgHead, StatMicMsgBody> & mStatMicMsg);
 
     /**
      * 检查Obj的队列超时
      */
     void doTimeout();
 
-    /**
-     * Obj的超时队列的长度
-     */
-    size_t timeoutQSize()
-    {
-        return _reqTimeoutQueue.size();
-    }
-    
     /**
      * 获取CommunicatorEpoll*
      */
@@ -159,10 +156,46 @@ public:
         return _name;
     }
 
+	/**
+	 * address
+	 * @return
+	 */
+	inline const string &hash() const
+	{
+		return _hash;
+	}
+
     /**
+     * address
+     * @return
+     */
+    inline const string &address() const
+    {
+    	return _address;
+    }
+
+    /**
+     * reconnect
+     * @param second
+     */
+    inline void reconnect(int second)
+	{
+		_reConnectSecond = second;
+	}
+
+	/**
+	 * reconnect
+	 * @param second
+	 */
+	inline int reconnect()
+	{
+		return _reConnectSecond;
+	}
+
+	/**
      * 判断此obj是否走按set规则调用流程，如果是直连方式，即使服务端是启用set的，也不认为是按set规则调用的
      */
-    bool IsInvokeBySet() const
+    bool isInvokeBySet() const
     {
         return _isInvokeBySet;
     }
@@ -173,21 +206,6 @@ public:
     const string& getInvokeSetName() const
     {
         return _invokeSetId;
-    }
-
-    /**
-     * 生成唯一Id
-     */
-    inline uint32_t generateId()
-    {
-        _id++;
-
-        if(_id == 0)
-        {
-            ++_id;
-        }
-
-        return _id;
     }
 
     /**
@@ -224,6 +242,18 @@ public:
         return _servantProxy;
     }
 
+	/**
+	 * 获取servantproxy
+	 */
+	inline ServantProxy * getRootServantProxy()
+	{
+		if(_servantProxy->_rootPrx)
+		{
+			return _servantProxy->_rootPrx.get();
+		}
+		return _servantProxy;
+	}
+
     /**
      * 设置servantproxy
      */
@@ -233,29 +263,40 @@ public:
     }
 
     /**
-     * 设置AK
+     *
+     * @return
      */
-    void setAccessKey(const string& k) { _accessKey = k; }
-    /**
-     * 设置SK
-     */
-    void setSecretKey(const string& k) { _secretKey = k; }
-    /**
-     * 获取AK
-     */
-    const string& getAccessKey() const  { return _accessKey; }
-    /**
-     * 获取SK
-     */
-    const string& getSecretKey() const  { return _secretKey; }
+	inline EndpointManager* getEndpointManager()
+	{
+    	return _endpointManger.get();
+	}
 
+    /**
+     * get all adapter proxy
+     * @return
+     */
+	const vector<AdapterProxy*> & getAdapters();
+
+	/**
+	 *
+	 * @param ep
+	 */
+	void onSetInactive(const EndpointInfo& ep);
+
+	/**
+	 * 完成一个包的调用(正常返回或者超时)
+	 * @param ep
+	 */    
+    void finishInvoke(ReqMessage * msg, AdapterProxy *adapterProxy);
 protected:
 
-    /**
-     * 处理请求异常
-     */
-    void doInvokeException(ReqMessage * msg);
+	/**
+	 * 处理请求异常
+	 *
+	 */
+	void doInvokeException(ReqMessage * msg);
 
+    void prepareConnection(AdapterProxy *adapterProxy);
 private:
     /*
      * 客户端网络线程的指针
@@ -263,9 +304,26 @@ private:
     CommunicatorEpoll *                   _communicatorEpoll;
 
     /*
-     * object的名称
+     * [obname]#hash@tcp -h xxxx -p xxx
      */
     string                                _name;
+
+    /**
+     * obname#[hash]@tcp -h xxxx -p xxx
+     * ever hash has one connection
+     */
+    string                                _hash;
+
+	/**
+	 * obname#hash@[tcp -h xxxx -p xxx]
+	 * ever hash has one connection
+	 */
+    string                                _address;
+
+    /**
+     * obj full name
+     */
+    string                                _sObjectProxyName;
 
     /*
      * 按set规则调用的set名称
@@ -278,12 +336,7 @@ private:
     bool                                  _isInvokeBySet;
 
     /*
-     * 生成请求的唯一id
-     */
-    uint32_t                              _id;
-
-    /*
-     * 是否调用了tars_set_protocol设置过proxy的协议函数，
+     * 是否调用了taf_set_protocol设置过proxy的协议函数，
      * 设置过了就不在设置
      */
     bool                                  _hasSetProtocol;
@@ -292,15 +345,16 @@ private:
      * 请求和响应的协议解析器
      */
     ProxyProtocol                         _proxyProtocol;
-    /*
-     * 协议名称
-     */
-    std::string                           _protoName;
 
     /*
      * 连接超时的时间
      */
     int                                   _conTimeout;
+
+    /**
+     * reconnect, 0: not reconnect
+     */
+    int                                   _reConnectSecond = 0;
 
     /*
      * 超时控制策略信息
@@ -323,21 +377,14 @@ private:
     std::unique_ptr<EndpointManager>      _endpointManger;
 
     /*
-     * 超时队列
+     * 超时队列(连接建立前)
      */
     TC_TimeoutQueueNoID<ReqMessage *>     _reqTimeoutQueue;
-
+    
     /*
      * ServantProxy
      */
-    ServantProxy *                        _servantProxy;
-
-    /**
-     * AK/SK
-     */
-    std::string                           _accessKey;
-    std::string                           _secretKey;
-
+    ServantProxy *                        _servantProxy = NULL;
 };
 ///////////////////////////////////////////////////////////////////////////////////
 }

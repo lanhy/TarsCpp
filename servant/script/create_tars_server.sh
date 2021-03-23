@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 if [ $# -lt 3 ]
 then
@@ -10,25 +10,29 @@ APP=$1
 SERVER=$2
 SERVANT=$3
 
+echo "APP:$APP, SERVER:$SERVER, SERVANT:$SERVANT"
+
 if [ "$SERVER" == "$SERVANT" ]
 then
 	echo "Error!(ServerName == ServantName)"
 	exit -1
 fi
 
-if [ ! -d $APP/$SERVER ]
+if [ ! -d $SERVER ]
 then
-	echo "[mkdir: $APP/$SERVER]"
-	mkdir -p $APP/$SERVER
+	echo "[mkdir: $SERVER]"
+	mkdir -p $SERVER
 fi
 
 echo "[create server: $APP.$SERVER ...]"
 
 DEMO_PATH=/usr/local/tars/cpp/script/demo
 
-cp $DEMO_PATH/* $APP/$SERVER/
+#make cleanall -C $DEMO_PATH
 
-cd $APP/$SERVER/
+cp -rf $DEMO_PATH/* $SERVER/
+
+cd $SERVER
 
 SRC_FILE="DemoServer.h DemoServer.cpp DemoServantImp.h DemoServantImp.cpp DemoServant.tars makefile"
 
@@ -39,14 +43,17 @@ do
 
 	cat $FILE | sed "s/DemoApp/$APP/g" > $FILE.tmp
 	mv $FILE.tmp $FILE
-	
+
 	cat $FILE | sed "s/DemoServant/$SERVANT/g" > $FILE.tmp
 	mv $FILE.tmp $FILE
 done
 
-rename "DemoServer" "$SERVER" $SRC_FILE
-rename "DemoServant" "$SERVANT" $SRC_FILE
+mv DemoServer.h ${SERVER}.h
+mv DemoServer.cpp ${SERVER}.cpp
+mv DemoServantImp.h ${SERVANT}Imp.h
+mv DemoServantImp.cpp ${SERVANT}Imp.cpp
+mv DemoServant.tars ${SERVANT}.tars
 
-cd ../../
+make
 
 echo "[done.]"

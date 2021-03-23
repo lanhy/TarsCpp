@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -26,12 +26,13 @@
 #include "servant/Message.h"
 #include "servant/StatReport.h"
 #include <queue>
-#ifdef _USE_OPENTRACKING
+#include <unordered_map>
+
+#ifdef TARS_OPENTRACKING
 #include <opentracing/span.h>
 #endif
 namespace tars
 {
-////////////////////////////////////////////////////////////////////////
 /**
  * 每个Adapter对应一个Endpoint，也就是一个服务端口
  */
@@ -43,7 +44,7 @@ public:
      * @param ep
      * @param op
      */
-    AdapterProxy(ObjectProxy * pObjectProxy, const EndpointInfo &ep, Communicator* pCom);
+    AdapterProxy(ObjectProxy * pObjectProxy, const EndpointInfo &ep,Communicator* pCom);
 
     /**
      * 析构函数
@@ -52,23 +53,32 @@ public:
 
     /**
      * 调用server端对象方法
+     * @param req
+     * @return int
      */
-    int invoke(ReqMessage * msg);
+	int invoke(ReqMessage * msg);
+
+	/**
+	 *
+	 */
+	void onConnect();
 
     /**
      * 发送请求
      * 发送挤压的数据
+     * @param req
+     * @return
      */
-    void doInvoke();
+    void doInvoke(bool initInvoke);
 
     /**
      * server端的响应包返回
      */
-    void finishInvoke(ResponsePacket &rsp);
+    void finishInvoke(shared_ptr<ResponsePacket> &rsp);
 
     /**
      * 端口是否有效,当连接全部失效时返回false
-     * @param bForceConnect : 是否强制发起连接,为true时不对状态进行判断就发起连接
+     * @bForceConnect : 是否强制发起连接,为true时不对状态进行判断就发起连接(onlyCheck = true有效)
      * @return bool
      */
     bool checkActive(bool bForceConnect = false);
@@ -86,14 +96,13 @@ public:
     /**
      * 处理stat
      */
-    void doStat(map<StatMicMsgHead, StatMicMsgBody> & mStatMicMsg);
-
+    void mergeStat(map<StatMicMsgHead, StatMicMsgBody> & mStatMicMsg);
     /**
      * 处理采样
      */
-    void sample(ReqMessage * msg);
+//    void sample(ReqMessage * msg);
 
-#ifdef _USE_OPENTRACKING
+#ifdef TARS_OPENTRACKING
 	/** 
 	 * Zipkin调用链
 	 */
@@ -111,7 +120,7 @@ public:
      * 获取端口信息
      * @return const EndpointInfo&
      */
-    inline const EndpointInfo & endpoint() const { return _endpoint; }
+    inline const EndpointInfo & endpoint() const { return _trans->getEndpointInfo(); }
 
     /**
      * 连接超时的时间
@@ -169,6 +178,20 @@ public:
      */
     inline int getId() const { return _id; }
 
+    /**
+     *
+     * @return
+     */
+	inline Transceiver* getTransceiver() const { return _trans.get(); }
+
+	/**
+	 * 屏蔽结点
+	 */
+	void onSetInactive();
+
+	void doInvoke_serial();
+
+    TC_TimeoutQueueNew<ReqMessage*> * getTimeoutQueue() { return _timeoutQueue.get(); }
 private:
 
     /**
@@ -204,9 +227,44 @@ private:
     void merge(const StatMicMsgBody& inBody, StatMicMsgBody& outBody);
 
     /**
-     * 获取被调名
+     * 连接串行模式
+     * @param msg
+     * @return
      */
-    string getSlaveName(const string& sSlaveName);
+	int invoke_connection_serial(ReqMessage * msg);
+
+	/**
+	 * 连接并行模式
+	 * @param msg
+	 * @return
+	 */
+	int invoke_connection_parallel(ReqMessage * msg);
+
+    /**
+     * 完成串行连接请求
+     * @param msg
+     * @return
+     */
+	void finishInvoke_serial(shared_ptr<ResponsePacket> & rsp);
+
+    /**
+     * 完成连接复用请求
+     * @param msg
+     * @return
+     */
+	void finishInvoke_parallel(shared_ptr<ResponsePacket> & rsp);
+
+	/**
+	 * 并行发送的情况(连接复用)
+	 */
+	void doInvoke_parallel();
+
+	/**
+	 * slave 名称(去掉set等信息)
+	 * @param sSlaveName
+	 * @return
+	 */
+	string getSlaveName(const string& sSlaveName);
 
 private:
 
@@ -220,10 +278,10 @@ private:
      */
     ObjectProxy*                           _objectProxy;
 
-    /*
-     * 节点信息
+    /**
+     * in request
      */
-    EndpointInfo                           _endpoint;
+    ReqMessage*                             _requestMsg = NULL;
 
     /*
      * 收发包处理
@@ -316,23 +374,13 @@ private:
     map<string,StatMicMsgBody>               _statBody;
 
     /*
-     * 最大采样次数
-     */
-    uint32_t                               _maxSampleCount;
-
-    /*
-     * 采样比率
-     */
-    int                                    _sampleRate;
-
-    /*
      * 调用链信息
      */
-#ifdef _USE_OPENTRACKING
+#ifdef TARS_OPENTRACKING
     map<int,std::unique_ptr<opentracing::Span>> _spanMap;
 #endif
     int                                    _id;
-    static  TC_Atomic                      _idGen;
+    static  atomic<int>                    _idGen;
 };
 ////////////////////////////////////////////////////////////////////
 }

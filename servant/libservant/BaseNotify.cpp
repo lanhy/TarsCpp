@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -34,7 +34,7 @@ void BaseNotify::addAdminCommandPrefix(const string& command, TAdminFunc func)
 
     _procFunctors.insert(std::make_pair(command, func));
 
-    NotifyObserver::getInstance()->registerPrefix(command, this);
+	_observer->registerPrefix(command, this);
 }
 
 void BaseNotify::addAdminCommandNormal(const string& command, TAdminFunc func)
@@ -43,10 +43,10 @@ void BaseNotify::addAdminCommandNormal(const string& command, TAdminFunc func)
 
     _procFunctors.insert(std::make_pair(command, func));
 
-    NotifyObserver::getInstance()->registerNotify(command, this);
+	_observer->registerNotify(command, this);
 }
 
-bool BaseNotify::notify(const string& cmd, const string& params, TarsCurrentPtr current, string& result)
+bool BaseNotify::notify(const string& cmd, const string& params, CurrentPtr current, string& result)
 {
     TC_LockT<TC_ThreadRecMutex> lock(*this);
 

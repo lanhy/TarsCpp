@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -33,7 +33,8 @@ namespace tars
 /** 
 * @file tc_rbtree.h 
 * @brief rbtree map类
-* 
+*  
+* @author  ruanshudong@qq.com
 */           
 /////////////////////////////////////////////////
 /**
@@ -42,7 +43,6 @@ namespace tars
 struct TC_RBTree_Exception : public TC_Exception
 {
     TC_RBTree_Exception(const string &buffer) : TC_Exception(buffer){};
-    TC_RBTree_Exception(const string &buffer, int err) : TC_Exception(buffer, err){};
     ~TC_RBTree_Exception() throw(){};
 };
  /**
@@ -68,9 +68,14 @@ public:
     struct RBTreeLockIterator;
     struct RBTreeIterator;
 
+    friend struct Block;
+    friend struct BlockAllocator;
+    friend struct RBTreeLockIterator;
+    friend struct RBTreeLockItem;
+
     /**
-    * @brief 操作数据
-    */
+	* @brief 操作数据
+	*/
     struct BlockData
     {
         string  _key;       /**数据Key*/
@@ -95,6 +100,7 @@ public:
         /**
          * @brief block数据头
          */
+        #pragma pack(1) 
         struct tagBlockHead
         {
             uint16_t    _iSize;         /**block的容量大小*/
@@ -116,11 +122,13 @@ public:
                 uint32_t  _iDataLen;      /**当前数据块中使用了的长度, _bNextChunk=false时有效*/
             };
             char        _cData[0];      /**数据开始部分*/
-        }__attribute__((packed));
+        };
+        #pragma pack() 
 
         /**
          * @brief 非头部的block, 称为chunk
          */
+        #pragma pack(1)  
         struct tagChunkHead
         {
             uint16_t    _iSize;         /**block的容量大小*/
@@ -131,7 +139,8 @@ public:
                 uint32_t  _iDataLen;      /**当前数据块中使用了的长度, _bNextChunk=false时有效*/
             };
             char        _cData[0];      /**数据开始部分*/
-        }__attribute__((packed));
+        };
+        #pragma pack() 
 
         /**
          * @brief 构造函数
@@ -1098,6 +1107,8 @@ public:
     /**
      * map头
      */
+#pragma pack(1) 
+
     struct tagMapHead
     {
         char        _cMaxVersion;        //大版本
@@ -1126,7 +1137,7 @@ public:
         uint32_t    _iOnlyKeyCount;        // OnlyKey个数
         uint32_t    _iRootAddr;          //根元素地址
         uint32_t    _iReserve[4];       //保留
-    }__attribute__((packed));
+    };
 
     /**
      * 需要修改的地址
@@ -1136,7 +1147,7 @@ public:
         size_t  _iModifyAddr;       //修改的地址
         char    _cBytes;            //字节数
         size_t  _iModifyValue;      //值
-    }__attribute__((packed));
+    };
 
     /**
      * 修改数据块头部
@@ -1146,11 +1157,12 @@ public:
         char            _cModifyStatus;         //修改状态: 0:目前没有人修改, 1: 开始准备修改, 2:修改完毕, 没有copy到内存中
         uint32_t        _iNowIndex;             //更新到目前的索引, 不能操作1000个
         tagModifyData   _stModifyData[1000];    //一次最多1000次修改
-    }__attribute__((packed));
+    };
+#pragma pack() 
 
     //64位操作系统用基数小版本号, 32位操作系统用偶数小版本
     //注意与hashmap的版本差别
-#if __WORDSIZE == 64
+#if __WORDSIZE == 64 || defined _WIN64
 
     //定义版本号
     enum
@@ -1740,11 +1752,6 @@ public:
     string desc();
 
 protected:
-
-    friend class Block;
-    friend class BlockAllocator;
-    friend class RBTreeLockIterator;
-    friend class RBTreeLockItem;
 
     //禁止copy构造
     TC_RBTree(const TC_RBTree &mcm);

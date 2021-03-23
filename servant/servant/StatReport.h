@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -42,6 +42,11 @@
 namespace tars
 {
 
+/**
+ * 状态上报类, 上报的信息包括:
+ * 1 模块间调用的信息
+ * 2 业务自定义的属性统计
+ */
 struct StatSampleMsgHead
 {
     string slaveName;
@@ -219,17 +224,17 @@ public:
     */
     StatFPrx getStatPrx() {return _statPrx; }
 
-    /*
-    * 采样
-    */
-    void doSample(const string& strSlaveName,
-                      const string& strInterfaceName,
-                      const string& strSlaveIp,
-                      map<string, string> &status);
-    /*
-    * 采样id
-    */
-    string sampleUnid();
+//    /*
+//    * 采样
+//    */
+//    void doSample(const string& strSlaveName,
+//                      const string& strInterfaceName,
+//                      const string& strSlaveIp,
+//                      map<string, string> &status);
+//    /*
+//    * 采样id
+//    */
+//    string sampleUnid();
 
     /**
      * 增加关注时间点.  调用方式addStatInterv(5)
@@ -306,21 +311,27 @@ private:
      */
     int reportPropMsg();
 
-    /**
-     * 上报多维度属性信息  Prop = property
-     * @return int
-     */
-    int reportPropPlusMsg();
+//    /**
+//     * 上报多维度属性信息  Prop = property
+//     * @return int
+//     */
+//    int reportPropPlusMsg();
 
     /**
      * stat 采样
      */
     int reportSampleMsg();
 
-
     //合并两个MicMsg
     void addMicMsg(MapStatMicMsg & old,MapStatMicMsg & add);
 
+	/**
+	 * get queue info
+	 * @return
+	 */
+	size_t getQueueSize(size_t epollIndex);
+
+	friend class CommunicatorEpoll;
 private:
     time_t              _time;
 

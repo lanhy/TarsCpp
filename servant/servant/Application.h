@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -20,22 +20,30 @@
 #include <iostream>
 #include <set>
 #include <signal.h>
+#include <vector>
 
 #include "util/tc_autoptr.h"
 #include "util/tc_config.h"
+#include "util/tc_option.h"
 #include "util/tc_epoll_server.h"
 #include "servant/BaseNotify.h"
 #include "servant/ServantHelper.h"
 #include "servant/ServantHandle.h"
 #include "servant/StatReport.h"
 #include "servant/CommunicatorFactory.h"
-#include "servant/TarsLogger.h"
-#include "servant/TarsConfig.h"
-#include "servant/TarsNotify.h"
+#include "servant/RemoteLogger.h"
+#include "servant/RemoteConfig.h"
+#include "servant/RemoteNotify.h"
+#include "util/tc_openssl.h"
 
 namespace tars
 {
-//////////////////////////////////////////////////////////////////////
+//#ifndef GEN_PYTHON_MASK
+
+#define OUT_LINE        (TC_Common::outfill("", '-', 80))
+#define OUT_LINE_LONG   (TC_Common::outfill("", '=', 80))
+#define OUT_LINE_TAB(x) (TC_Common::outfill("", '-', 80 - 4*x))
+
 /**
  * 以下定义配置框架支持的命令
  */
@@ -51,25 +59,29 @@ namespace tars
 #define TARS_CMD_SET_DAYLOG_LEVEL    "tars.enabledaylog"      //设置按天日志是否输出: tars.enabledaylog [remote|local]|[logname]|[true|false]
 #define TARS_CMD_CLOSE_CORE          "tars.closecore"         //设置服务的core limit:  tars.setlimit [yes|no]
 #define TARS_CMD_RELOAD_LOCATOR      "tars.reloadlocator"     //重新加载locator的配置信息
-
+#define TARS_CMD_RESOURCE            "tars.resource"          //get resource
+#define TARS_CMD_VIEW_BID            "tars.bid"               //查看服务编译时间,build id
 //////////////////////////////////////////////////////////////////////
 /**
  * 通知信息给notify服务, 展示在页面上
  */
 //上报普通信息
-#define TARS_NOTIFY_NORMAL(info)     {TarsRemoteNotify::getInstance()->notify(NOTIFYNORMAL, info);}
+#define TARS_NOTIFY_NORMAL(info)     {RemoteNotify::getInstance()->notify(NOTIFYNORMAL, info);}
 
 //上报警告信息
-#define TARS_NOTIFY_WARN(info)       {TarsRemoteNotify::getInstance()->notify(NOTIFYWARN, info);}
+#define TARS_NOTIFY_WARN(info)       {RemoteNotify::getInstance()->notify(NOTIFYWARN, info);}
 
 //上报错误信息
-#define TARS_NOTIFY_ERROR(info)      {TarsRemoteNotify::getInstance()->notify(NOTIFYERROR, info);}
+#define TARS_NOTIFY_ERROR(info)      {RemoteNotify::getInstance()->notify(NOTIFYERROR, info);}
 
 //发送心跳给node 多个adapter分别上报
-#define TARS_KEEPALIVE(adapter)      {TarsNodeFHelper::getInstance()->keepAlive(adapter);}
+#define TARS_KEEPALIVE(adapter)      {KeepAliveNodeFHelper::getInstance()->keepAlive(adapter);}
+
+//发送激活信息
+#define TARS_KEEPACTIVING            {KeepAliveNodeFHelper::getInstance()->keepActiving();}
 
 //发送TARS版本给node
-#define TARS_REPORTVERSION(x)        {TarsNodeFHelper::getInstance()->reportVersion(TARS_VERSION);}
+#define TARS_REPORTVERSION(x)        {KeepAliveNodeFHelper::getInstance()->reportVersion(TARS_VERSION);}
 
 //////////////////////////////////////////////////////////////////////
 /**
@@ -92,8 +104,9 @@ namespace tars
 /**
  * 服务基本信息
  */
-struct ServerConfig
+struct SVT_DLL_API ServerConfig
 {
+    static std::string TarsPath;
     static std::string Application;         //应用名称
     static std::string ServerName;          //服务名称,一个服务名称含一个或多个服务标识
     static std::string BasePath;            //应用程序路径，用于保存远程系统配置的本地目录
@@ -109,26 +122,36 @@ struct ServerConfig
     static std::string Config;              //配置中心地址
     static std::string Notify;              //信息通知中心
     static std::string ConfigFile;          //框架配置文件路径
-    static int         ReportFlow;          //是否服务端上报所有接口stat流量 0不上报 1上报(用于非tars协议服务流量统计)
+    static bool        CloseCout;
+    static int         ReportFlow;          //是否服务端上报所有接口stat流量 0不上报 1上报(用于非taf协议服务流量统计)
     static int         IsCheckSet;          //是否对按照set规则调用进行合法性检查 0,不检查，1检查
-    static bool        OpenCoroutine;        //是否启用协程处理方式
+    static bool        OpenCoroutine;       //是否启用协程处理方式
     static size_t      CoroutineMemSize;    //协程占用内存空间的最大大小
-    static uint32_t    CoroutineStackSize;    //每个协程的栈大小(默认128k)
+    static uint32_t    CoroutineStackSize;  //每个协程的栈大小(默认128k)
+	static int         NetThread;           //servernet thread
+	static bool        ManualListen;        //是否启用手工端口监听
+	static bool        MergeNetImp;         //网络线程和IMP线程合并(以网络线程个数为准)
+	static int         BackPacketLimit;     //回包积压检查
+	static int         BackPacketMin;       //回包速度检查
+
+	static std::string CA;
+	static std::string Cert;
+	static std::string Key;
+	static bool VerifyClient;
+	static std::string Ciphers;
+
+	static map<string, string> Context;     //框架内部用, 传递节点名称(以域名形式部署时)
 };
+
+class PropertyReport;
+class NotifyObserver;
 
 //////////////////////////////////////////////////////////////////////
 /**
  * 服务的基类
  */
-class Application : public BaseNotify
+class Application: public BaseNotify
 {
-public:
-
-    enum
-    {
-        REPORT_SEND_QUEUE_INTERVAL = 10, /**上报服务端发送队列大小的间隔时间**/
-    };
-
 public:
     /**
      * 应用构造
@@ -145,10 +168,12 @@ public:
      * @param argv
      */
     void main(int argc, char *argv[]);
+    void main(const TC_Option &option);
+	void main(const string &config);
 
-    /**
-     * 运行
-     */
+	/**
+	 * 运行
+	 */
     void waitForShutdown();
 
 public:
@@ -157,26 +182,33 @@ public:
      *
      * @return TC_Config&
      */
-    static TC_Config& getConfig();
+    TC_Config &getConfig() { return _conf; }
+	const TC_Config &getConfig() const { return _conf; }
 
-    /**
-     * 获取通信器
-     *
-     * @return CommunicatorPtr&
-     */
+	/**
+	 * 获取通信器
+	 *
+	 * @return CommunicatorPtr&
+	 */
     static CommunicatorPtr& getCommunicator();
 
-    /**
-     * 获取服务Server对象
-     *
-     * @return TC_EpollServerPtr&
-     */
-    static TC_EpollServerPtr& getEpollServer();
+	/**
+	 * 获取服务Server对象
+	 *
+	 * @return TC_EpollServerPtr&
+	 */
+    TC_EpollServerPtr &getEpollServer() { return _epollServer; }
+	const TC_EpollServerPtr &getEpollServer() const { return _epollServer; }
+
+	/**
+	 *  中止应用
+	 */
+    void terminate();
 
     /**
-     *  中止应用
+     * 获取tarsservant框架的版本
      */
-    static void terminate();
+    static string getTarsVersion();
 
     /**
      * 添加Config
@@ -190,6 +222,56 @@ public:
      */
     bool addAppConfig(const string &filename);
 
+    /**
+     * 手工监听所有端口(Admin的端口是提前就监听的)
+     */
+    void manualListen();
+
+    /**
+     * 添加Servant
+     * @param T
+     * @param id
+     */
+    template<typename T>
+    void addServant(const string &id)
+    {
+	    _servantHelper->addServant<T>(id, this, true);
+    }
+
+	template<typename T, typename P>
+	void addServantWithParams(const string &id, const P &p)
+	{
+#ifndef GEN_PYTHON_MASK
+		_servantHelper->addServant<T>(id, this, p, true);
+#endif
+	}
+
+	/**
+	 * get servant helper
+	 * @return
+	 */
+	const shared_ptr<ServantHelperManager> &getServantHelper() { return _servantHelper; }
+
+	/**
+	 * get notify observer
+	 * @return
+	 */
+	const shared_ptr<NotifyObserver> &getNotifyObserver() { return _notifyObserver; }
+
+    /**
+     * 非taf协议server，设置Servant的协议解析器
+     * @param protocol
+     * @param servant
+     */
+    void addServantProtocol(const string &servant, const TC_NetWorkBuffer::protocol_functor &protocol);
+
+    /**
+     * @desc 添加接收新链接的回调
+     * 
+     * @param cb
+     */
+    void addAcceptCallback(const TC_EpollServer::accept_callback_functor& cb);
+
 protected:
     /**
      * 初始化, 只会进程调用一次
@@ -202,11 +284,21 @@ protected:
     virtual void destroyApp() = 0;
 
     /**
+     * 解析服务的网络配置(业务可以在里面变更网络配置)
+     */  
+    virtual void onParseConfig(TC_Config &conf){};
+    
+    /**
+     * 初始化ServerConfig之后, 给app调整自定义配置值的机会
+     */    
+    virtual void onServerConfig(){};
+   
+    /**
      * 处理加载配置的命令
      * 处理完成后继续通知Servant
      * @param filename
      */
-    bool cmdLoadConfig(const string& command, const string& params, string& result);
+    bool cmdLoadConfig(const string &command, const string &params, string &result);
 
     /**
      * 设置滚动日志等级
@@ -216,7 +308,7 @@ protected:
      *
      * @return bool
      */
-    bool cmdSetLogLevel(const string& command, const string& params, string& result);
+    bool cmdSetLogLevel(const string &command, const string &params, string &result);
 
     /**
      * 设置服务的core limit
@@ -236,7 +328,7 @@ protected:
      *
      * @return bool
      */
-    bool cmdEnableDayLog(const string& command, const string& params, string& result);
+    bool cmdEnableDayLog(const string &command, const string &params, string &result);
 
     /**
      * 查看服务状态
@@ -246,7 +338,7 @@ protected:
      *
      * @return bool
      */
-    bool cmdViewStatus(const string& command, const string& params, string& result);
+    bool cmdViewStatus(const string &command, const string &params, string &result);
 
     /**
      * 查看链接状态
@@ -256,7 +348,7 @@ protected:
      *
      * @return bool
      */
-    bool cmdConnections(const string& command, const string& params, string& result);
+    bool cmdConnections(const string &command, const string &params, string &result);
 
     /**
      * 查看编译的版本
@@ -266,7 +358,17 @@ protected:
      *
      * @return bool
      */
-    bool cmdViewVersion(const string& command, const string& params, string& result);
+    bool cmdViewVersion(const string &command, const string &params, string &result);
+
+    /**
+     * 查看服务的buildid（编译时间）
+     * @param command
+     * @param params
+     * @param result
+     *
+     * @return bool
+     */
+    bool cmdViewBuildID(const string &command, const string &params, string &result);
 
     /**
      * 使配置文件的property信息生效
@@ -276,7 +378,7 @@ protected:
      *
      * @return bool
      */
-    bool cmdLoadProperty(const string& command, const string& params, string& result);
+    bool cmdLoadProperty(const string &command, const string &params, string &result);
 
     /**
      *查看服务支持的管理命令
@@ -285,7 +387,7 @@ protected:
      *
      * @return bool
      */
-    bool cmdViewAdminCommands(const string& command, const string& params, string& result);
+    bool cmdViewAdminCommands(const string &command, const string &params, string &result);
 
     /**
      * 设置染色消息
@@ -295,7 +397,7 @@ protected:
      *
      * @return bool
      */
-    bool cmdSetDyeing(const string& command, const string& params, string& result);
+    bool cmdSetDyeing(const string &command, const string &params, string &result);
 
 
     /**
@@ -316,40 +418,31 @@ protected:
     */
     bool cmdReloadLocator(const string& command, const string& params, string& result);
 
+	/*
+	* view server resource
+	* @param command
+	* @param params
+	* @param result
+	*/
+	bool cmdViewResource(const string& command, const string& params, string& result);
+
 protected:
 
     /**
-     * 为Adapter绑定对应的handle类型
-     * 缺省实现是ServantHandle类型
-     * @param adapter
+     * @desc callback when accept new client
+     * 
+     * @param cPtr
      */
-    virtual void setHandle(TC_EpollServer::BindAdapterPtr& adapter);
+    void onAccept(TC_EpollServer::Connection* cPtr);
 
     /**
-     * 添加Servant
-     * @param T
-     * @param id
-     */
-    template<typename T> void addServant(const string &id)
-    {
-        ServantHelperManager::getInstance()->addServant<T>(id,true);
-    }
-
-    /**
-     * 非tars协议server，设置Servant的协议解析器
-     * @param protocol
-     * @param servant
-     */
-    void addServantProtocol(const string& servant, const TC_EpollServer::protocol_functor& protocol);
-
-    /**
-     * 非taf协议server，设置Servant的协议解析器,带有连接信息
-     * @param protocol
-     * @param servant
-     */
-    void addServantConnProtocol(const string& servant, const TC_EpollServer::conn_protocol_functor& protocol);
-    /**
-     *设置Servant的连接断开回调
+     *
+     *
+     * @param command
+     * @param params
+     * @param result
+     *
+     * @return bool
      */
     void addServantOnClose(const string& servant, const TC_EpollServer::close_functor& f);
 
@@ -391,7 +484,7 @@ protected:
     /**
      * 解析配置文件
      */
-    void parseConfig(int argc, char *argv[]);
+    void parseConfig(const string &config);
 
      /**
      * 解析ip权限allow deny 次序
@@ -399,15 +492,22 @@ protected:
     TC_EpollServer::BindAdapter::EOrder parseOrder(const string &s);
 
     /**
-     * 绑定server配置的Adapter和对象
+     * bind server adapter
      */
-    void bindAdapter(vector<TC_EpollServer::BindAdapterPtr>& adapters);
+    void bindAdapter(vector<TC_EpollServer::BindAdapterPtr> &adapters);
 
     /**
+     * set adapter
+     * @param adapter
+     * @param name
+     */
+	void setAdapter(TC_EpollServer::BindAdapterPtr& adapter, const string &name);
+
+	/**
      * @param servant
      * @param sPrefix
      */
-    void checkServantNameValid(const string& servant, const string& sPrefix);
+    void checkServantNameValid(const string &servant, const string &sPrefix);
 
     /**
      * 换成缺省值
@@ -422,28 +522,47 @@ protected:
      *
      * @return string 没有按set分组则返回空""
      */
-     string setDivision(void);
-
-     /*
-     * 等待服务退出
-     */
-     void waitForQuit();
+    string setDivision(void);
 
 protected:
     /**
-     * 配置文件
+     * config
      */
-    static TC_Config           _conf;
+    TC_Config _conf;
 
     /**
-     * 服务
+     * epoll server
      */
-    static TC_EpollServerPtr   _epollServer;
+    TC_EpollServerPtr   _epollServer;
 
     /**
-     * 通信器
+     * communicator
      */
     static CommunicatorPtr     _communicator;
+
+    /**
+     * accept
+     */
+    std::vector<TC_EpollServer::accept_callback_functor> _acceptFuncs;
+
+	/**
+	 * servant helper
+	 */
+	shared_ptr<ServantHelperManager>    _servantHelper;
+
+	/**
+	 * notify observer
+	 */
+	shared_ptr<NotifyObserver>          _notifyObserver;
+
+    /**
+     * ssl ctx
+     */
+	shared_ptr<TC_OpenSSL::CTX> _ctx = nullptr;
+
+    PropertyReport * _pReportQueue;
+    PropertyReport * _pReportConRate;
+    PropertyReport * _pReportTimeoutNum;
 };
 ////////////////////////////////////////////////////////////////////
 }

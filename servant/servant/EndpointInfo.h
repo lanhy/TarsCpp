@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -17,21 +17,26 @@
 #ifndef __TARS_ENDPOINT_INFO_H_
 #define __TARS_ENDPOINT_INFO_H_
 
-#include "servant/Global.h"
+//#include "servant/Global.h"
 #include "util/tc_socket.h"
+#include "util/tc_clientsocket.h"
+#include "EndpointF.h"
+//#include "AuthF.h"
+
+#if TARGET_PLATFORM_WINDOWS
+#include <WS2tcpip.h>
+#endif
 
 using namespace std;
 
 namespace tars
 {
-//////////////////////////////////////////////////////////////////////////////
 /**
  * 地址信息IP:Port
  */
 class EndpointInfo
 {
 public:
-    enum EType { UDP = 0, TCP = 1, SSL = 2};
 
     /**
      * 构造函数
@@ -39,21 +44,70 @@ public:
     EndpointInfo();
 
     /**
+     *
+     * @param ep
+     */
+	EndpointInfo(const TC_Endpoint &ep, const string &setDivision="");
+
+	/**
      * 构造函数
      * @param host
      * @param port
      * @param type
      */
-    EndpointInfo(const string& host, uint16_t port, EndpointInfo::EType type, int32_t grid, const string & setDivision, int qos, int weight = -1, unsigned int weighttype = 0, int authType = 0);
+	EndpointInfo(const EndpointF &ep);
 
     /**
-     * 地址的字符串描述,不带set信息
+     * get endpoint
+     * @return
+     */
+	const TC_Endpoint &getEndpoint() const { return _ep; }
+
+	/**
+	 *
+	 * @return
+	 */
+	TC_Endpoint &getEndpoint() { return _ep; }
+
+	/**
+	 * 设置代理地址
+	 * @param ep
+	 */
+	void setProxyEndpoint(const TC_Endpoint &ep) { _epProxy.reset(new TC_Endpoint(ep)); }
+
+	/**
+	 * 获取代理地址, 没有则为NULL
+	 */
+	const TC_Endpoint *getProxyEndpoint() const { return _epProxy.get(); }
+
+	/**
+	 * 获取连接地址
+	 * @return
+	 */
+	const TC_Endpoint *getConnectEndpoint() const { return _epProxy? _epProxy.get() : &_ep; }
+
+	/**
+	 * @brief is ipv6 socket or not
+	 * @return true if is ipv6
+	 */
+	bool isConnectIPv6() const  { return getConnectEndpoint()->isIPv6(); }
+
+	/**
+	 * 解析域名
+	 */
+	void parseConnectAddress();
+
+	/**
+     * 地址的字符串描述(用于比较)
      *
      * @return string
      */
-     const string& descNoSetInfo() const;
+	const string & cmpDesc() const
+	{
+		return _cmpDesc;
+	}
 
-    /**
+	/**
      * 地址的字符串描述
      *
      * @return string
@@ -64,28 +118,17 @@ public:
     }
 
     /**
-     * 比较的地址的字符串描述
      *
-     * @return string
+     * @return
      */
-    const string & compareDesc() const
-    {
-        return _cmpDesc;
-    }
+	bool isTcp() const;
 
-    /**
-     * 详细地址字符串描述
-     * 
-     * @return string 
-     */
-    const string& fulldesc() const;
-
-    /**
+	/**
      * 获取主机名
      *
      * @return const string&
      */
-    string host() const;
+    const string &host() const;
 
     /**
      * 获取端口号
@@ -103,38 +146,38 @@ public:
     /*
      * 获取qos的descp值
      */
-    int32_t qos() const {return _qos;}
+    int32_t qos() const {return _ep.getQos();}
 
     /*
      * 获取节点的静态权重值
      */
-    int weight() const {return _weight;}
+    int weight() const {return _ep.getWeight();}
 
     /**
      * @brief 获取节点的权重使用方式
      */
-    unsigned int getWeightType() const { return _weighttype; }
+    unsigned int getWeightType() const { return _ep.getWeightType(); }
 
-    /**
-     * 获取主机地址
-     *
-     * @return const struct sockaddr_in&
-     */
-    const struct sockaddr_in& addr() const;
+//    /**
+//     * 获取主机地址
+//     *
+//     * @return const struct sockaddr_in&
+//     */
+//    const struct sockaddr_in& addr() const;
 
     /**
      * Get ipv4 or ipv6 struct sockaddr
      *
      * @return const struct sockaddr *
      */
-    const struct sockaddr * addrPtr() const;
+    const struct sockaddr * connectAddrPtr() const;
 
     /**
      * 返回端口类型
      *
      * @return EndpointInfo::EType
      */
-    EndpointInfo::EType type() const;
+    TC_Endpoint::EType type() const { return _ep.getType(); }
 
     /**
     *设置set分组信息
@@ -153,13 +196,13 @@ public:
     /*
      * 获取认证类型
      */
-    int authType() const  { return _authType; }
+    int authType() const  { return _ep.getAuthType(); }
 
     /**
      * @brief is ipv6 socket or not
      * @return true if is ipv6
      */
-    bool isIPv6() const  { return _isIPv6; }
+    bool isIPv6() const  { return _ep.isIPv6(); }
 
     /**
      * 等于
@@ -168,14 +211,6 @@ public:
      * @return bool
      */
     bool operator == (const EndpointInfo& r) const;
-
-    /**
-    *等于,set信息不参与比较
-    *@param r
-    *
-    *@return bool
-    */
-    bool equalNoSetInfo(const EndpointInfo& r) const;
 
     /**
      * 小于
@@ -202,46 +237,20 @@ protected:
     string createCompareDesc();
 
 private:
-    /**
-     * 地址IP
-     */
-    string                   _host;
+	/**
+	 * 服务地址
+	 */
+    TC_Endpoint _ep;
 
     /**
-     * 端口号
+     * 代理地址
      */
-    uint16_t               _port;
+	shared_ptr<TC_Endpoint> _epProxy;
 
-    /**
-     * 路由状态
-     */
-    int32_t                _grid;
-
-    /*
-     * qos的dscp值
-     */
-
-    int32_t                _qos;
-
-    /**
-     * 类型
-     */
-    EndpointInfo::EType    _type;
-
-   /**
-    *set分组信息
-    */
+	/**
+	 *set分组信息
+	 */
     string                 _setDivision;
-
-    /**
-     *  节点的静态权重值
-     */
-    int                    _weight;
-
-    /**
-     *  节点的权重使用方式
-     */
-    unsigned int           _weighttype;
 
     /**
      * 地址
@@ -262,15 +271,11 @@ private:
      */
     string                 _desc;
 
-    /**
-     *  认证类型
-     */
-    int                    _authType;
 
     /**
-     * _host is IPv6 or not
-     */
-    bool                   _isIPv6;
+     * 解析域名成功
+     */ 
+    bool                   _addressSucc;
 };
 /////////////////////////////////////////////////////////////////////////////
 }

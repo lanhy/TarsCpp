@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -48,7 +48,7 @@ void ServantHelperManager::setAdapterServant(const string &sAdapter, const strin
 bool ServantHelperManager::setDyeing(const string & sDyeingKey, const string & sDyeingServant,
         const string & sDyeingInterface)
 {
-    TC_LockT<TC_ThreadMutex> lock(_mutex);
+    TC_LockT<TC_SpinLock> lock(_mutex);
 
     _dyeingKey       = sDyeingKey;
     _dyeingServant   = sDyeingServant;
@@ -59,9 +59,9 @@ bool ServantHelperManager::setDyeing(const string & sDyeingKey, const string & s
     return true;
 }
 
-bool ServantHelperManager::isDyeingReq(const string & sKey, const string & sServant, const string & sInterface)
+bool ServantHelperManager::isDyeingReq(const string & sKey, const string & sServant, const string & sInterface) const
 {
-    TC_LockT<TC_ThreadMutex> lock(_mutex);
+    TC_LockT<TC_SpinLock> lock(_mutex);
 
     return  ((_dyeingKey == sKey) && (_dyeingServant == sServant) &&
         (_dyeingInterface == "" || _dyeingInterface == sInterface) );

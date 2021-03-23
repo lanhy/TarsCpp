@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -18,7 +18,7 @@
 #define __TARS_NOTIFY_OBSERVER_H_
 
 #include "servant/Global.h"
-#include "servant/TarsCurrent.h"
+#include "servant/Current.h"
 #include "util/tc_singleton.h"
 
 namespace tars
@@ -30,7 +30,7 @@ class BaseNotify;
 /**
  * 全局接收管理命令，并通知到已注册的对象
  */
-class NotifyObserver : public TC_Singleton<NotifyObserver>, public TC_ThreadRecMutex
+class SVT_DLL_API NotifyObserver : public TC_ThreadRecMutex
 {
 public:
     /**
@@ -51,7 +51,7 @@ public:
      * @param current
      * @return string
      */
-    string notify(const string& command, TarsCurrentPtr current);
+    string notify(const string& command, CurrentPtr current);
 
 public:
     /**

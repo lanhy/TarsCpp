@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -21,18 +21,20 @@
 #include <string>
 #include <memory>
 #include <deque>
+#include "util/tc_platform.h"
 #include "util/tc_monitor.h"
 #include "util/tc_epoll_server.h"
 #include "servant/Servant.h"
 #include "servant/StatReport.h"
-#include <ucontext.h>
 #include "servant/CoroutineScheduler.h"
-#ifdef _USE_OPENTRACKING
+#ifdef TARS_OPENTRACKING
 #include "opentracing/span.h"
 #endif
 
 namespace tars
 {
+class Application;
+
 //////////////////////////////////////////////////////////////////////////////
 /**
  * 处理网络请求线程
@@ -51,22 +53,28 @@ public:
     /**
      * 构造
      */
-    ServantHandle();
+    ServantHandle(Application *application);
 
     /**
      * 析够
      */
     ~ServantHandle();
 
-    /**
-     * 线程处理方法
-     */
-    virtual void run();
+	/**
+	 * 线程处理方法
+	 */
+	virtual void run();
 
     /**
      * 获取协程调度器
      */
     CoroutineScheduler* getCoroSched() { return _coroSched; }
+
+	/**
+	 * get Application
+	 * @return
+	*/
+	Application *getApplication() { return _application; }
 
 protected:
 
@@ -78,7 +86,7 @@ protected:
     /**
      * 处理请求的协程函数
      */
-    virtual void handleRecvData(TC_EpollServer::tagRecvData *stRecvData);
+    virtual void handleRecvData(const shared_ptr<TC_EpollServer::RecvContext> &data);
 
 protected:
     /**
@@ -90,30 +98,31 @@ protected:
      * 逻辑处理
      * @param stRecvData
      */
-    virtual void handle(const TC_EpollServer::tagRecvData &stRecvData);
+    virtual void handle(const shared_ptr<TC_EpollServer::RecvContext> &data);
 
     /**
      * 超时处理
      * @param stRecvData
      */
-    virtual void handleTimeout(const TC_EpollServer::tagRecvData &stRecvData);
+    virtual void handleTimeout(const shared_ptr<TC_EpollServer::RecvContext> &data);
 
     /**
      * overload 处理
      * @param stRecvData
      */
-    virtual void handleOverload(const TC_EpollServer::tagRecvData &stRecvData);
+    virtual void handleOverload(const shared_ptr<TC_EpollServer::RecvContext> &data);
 
     /**
      * close 事件处理
      * @param stRecvData
      */
-    virtual void handleClose(const TC_EpollServer::tagRecvData &stRecvData);
+    virtual void handleClose(const shared_ptr<TC_EpollServer::RecvContext> &data);
 
-    /**
-     * handleFilter拆分的第一部分，处理异步调用队列
-     */
-    virtual void handleAsyncResponse();
+
+	/**
+	 * handleFilter拆分的第一部分，处理异步调用队列
+	 */
+	virtual void handleAsyncResponse();
 
     /**
      * handleFilter拆分的第二部分，处理用户自有数据
@@ -135,16 +144,17 @@ protected:
     /**
      * 创建上下文
      * @param stRecvData
-     * @return TarsCurrent*
+     * @return Current*
      */
-    TarsCurrentPtr createCurrent(const TC_EpollServer::tagRecvData &stRecvData);
+//    CurrentPtr createCurrent(const TC_EpollServer::RecvContext &stRecvData);
+	CurrentPtr createCurrent(const shared_ptr<TC_EpollServer::RecvContext> &data);
 
-    /**
+	/**
      * 创建闭连接时的关上下文
      * @param stRecvData
-     * @return TarsCurrent*
+     * @return JceCurrent*
      */
-    TarsCurrentPtr createCloseCurrent(const TC_EpollServer::tagRecvData &stRecvData);
+    CurrentPtr createCloseCurrent(const shared_ptr<TC_EpollServer::RecvContext> &data);
 
     /**
      * 处理Tars协议
@@ -160,14 +170,8 @@ protected:
      */
     void handleNoTarsProtocol(const TarsCurrentPtr &current);
 
-    /**
-     * 处理TARS下的采样统计逻辑
-     *
-     * @param current
-     */
-    void processSample(const TarsCurrentPtr &current);
 
-#ifdef _USE_OPENTRACKING
+#ifdef TARS_OPENTRACKING
     /**
      * 处理TARS下的调用链逻辑
      *
@@ -183,7 +187,12 @@ protected:
      *
      * @param current
      */
-    bool processDye(const TarsCurrentPtr &current, string& dyeingKey);
+    bool processDye(const CurrentPtr &current, string& dyeingKey);
+
+    /**
+     * 处理cookie
+     */
+    bool processCookie(const CurrentPtr &current, map<string, string> &cookie);
 
     /**
      * 检查set调用合法性
@@ -191,25 +200,25 @@ protected:
      * @param current
      * @return bool 如果调用合法返回true，如果调用非法则返回false
      */
-    bool checkValidSetInvoke(const TarsCurrentPtr &current);
+	bool checkValidSetInvoke(const CurrentPtr &current);
 protected:
+	/**
+	 * application
+	 */
+	Application *_application = NULL;
 
     /**
      * 处理对象
      */
-    map<string, ServantPtr> _servants;
+    unordered_map<string, ServantPtr> _servants;
 
-    /**
-     * 消息到达通知
-     */
-    TC_ThreadLock           _monitor;
 
     /**
      * 协程调度器
      */
     CoroutineScheduler     *_coroSched;
 
-#ifdef _USE_OPENTRACKING
+#ifdef TARS_OPENTRACKING
     map<int,std::unique_ptr<opentracing::Span>> _spanMap;
 #endif
 };

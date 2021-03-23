@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tencent is pleased to support the open source community by making Tars available.
  *
  * Copyright (C) 2016THL A29 Limited, a Tencent company. All rights reserved.
@@ -35,15 +35,17 @@ void HttpImp::destroy()
 
 int HttpImp::doRequest(TarsCurrentPtr current, vector<char> &buffer)
 {
-    TC_HttpRequest request; 
+    TC_HttpRequest request;
+
     vector<char> v = current->getRequestBuffer();
-    string sBuf;
-    sBuf.assign(&v[0],v.size());
-    request.decode(sBuf);
+
+    request.decode(current->getRequestBuffer());
+
     TC_HttpResponse rsp;
-    string s="hello";
+    string s=request.getContent();
     rsp.setResponse(s.c_str(),s.size());
+    rsp.setHeader("Connection", request.getHeader("Connection"));
     rsp.encode(buffer);
-   
+    
     return 0;
 }
